@@ -14,11 +14,12 @@ class VideoGenerator:
     """
     Generates videos of the simulation without UI display.
     """
-    def __init__(self, energy_factor=1.01, width=800, height=600, fps=60):
+    def __init__(self, energy_factor=1.01, width=800, height=600, fps=60, simulation_speed_multiplier=4.0):
         self.energy_factor = energy_factor
         self.width = width
         self.height = height
         self.fps = fps
+        self.simulation_speed_multiplier = simulation_speed_multiplier  # How much faster to run simulation
         self.target_duration = 60  # seconds to run before speed boost
         self.final_duration = 70   # total duration including speed boost
         
@@ -85,30 +86,37 @@ class VideoGenerator:
         frame_count = 0
         speed_boosted = False
         
-        print(f"Starting simulation with {len(simulation.points)} points, energy factor {self.energy_factor}")
+        # Calculate time step for accelerated simulation
+        base_dt = 1.0 / self.fps  # Normal time step
+        accelerated_dt = base_dt * self.simulation_speed_multiplier
         
-        while True:
-            current_time = time.time()
-            elapsed_time = current_time - start_time
+        # Calculate total frames needed for target video duration
+        target_frames = int(self.target_duration * self.fps)  # 60s * 60fps = 3600 frames
+        final_frames = int(self.final_duration * self.fps)    # 70s * 60fps = 4200 frames
+        
+        print(f"Starting simulation with {len(simulation.points)} points, energy factor {self.energy_factor}")
+        print(f"Simulation speed: {self.simulation_speed_multiplier}x (generating {self.final_duration}s video in {self.final_duration/self.simulation_speed_multiplier:.1f}s real time)")
+        
+        while frame_count < final_frames:
+            current_real_time = time.time()
+            elapsed_real_time = current_real_time - start_time
             
-            # Check if we should stop (simulation ended early or reached final duration)
-            if elapsed_time >= self.final_duration:
-                print(f"Simulation completed full duration: {elapsed_time:.1f}s")
-                return True
+            # Calculate current video time based on frame count
+            video_time = frame_count / self.fps
             
             # Check if all points are gone (simulation ended early)
             if len(simulation.points) == 0:
-                print(f"Simulation ended early at {elapsed_time:.1f}s - all points eliminated")
+                print(f"Simulation ended early at {video_time:.1f}s video time - all points eliminated (real time: {elapsed_real_time:.1f}s)")
                 return False
             
             # Check if only one point remains before reaching target duration (boring scenario)
-            if len(simulation.points) == 1 and elapsed_time < self.target_duration:
-                print(f"Simulation ended early at {elapsed_time:.1f}s - only one point remaining (boring)")
+            if len(simulation.points) == 1 and video_time < self.target_duration:
+                print(f"Simulation ended early at {video_time:.1f}s video time - only one point remaining (boring) (real time: {elapsed_real_time:.1f}s)")
                 return False
             
             # Apply speed boost at target duration
-            if elapsed_time >= self.target_duration and not speed_boosted:
-                print(f"Applying speed boost at {elapsed_time:.1f}s")
+            if frame_count >= target_frames and not speed_boosted:
+                print(f"Applying speed boost at {video_time:.1f}s video time (real time: {elapsed_real_time:.1f}s)")
                 # Set maximum speed to infinity (remove speed limit)
                 for point in simulation.points:
                     point.max_speed = float('inf')
@@ -117,9 +125,8 @@ class VideoGenerator:
                 config.MAX_POINT_SPEED = float('inf')
                 speed_boosted = True
             
-            # Update simulation physics
-            dt = self.clock.tick(self.fps) / 1000.0
-            simulation.update_physics(dt)
+            # Update simulation physics with accelerated time step
+            simulation.update_physics(accelerated_dt)
             
             # Render to our surface
             simulation.render()
@@ -130,13 +137,17 @@ class VideoGenerator:
             
             frame_count += 1
             
-            # Print progress every 5 seconds
+            # Print progress every 5 seconds of video time
             if frame_count % (self.fps * 5) == 0:
-                print(f"Progress: {elapsed_time:.1f}s, Points: {len(simulation.points)}, Lines: {sum(1 for line in simulation.lines.values() if line.active)}")
+                real_time_ratio = video_time / elapsed_real_time if elapsed_real_time > 0 else 0
+                print(f"Progress: {video_time:.1f}s video time ({elapsed_real_time:.1f}s real, {real_time_ratio:.1f}x speed), Points: {len(simulation.points)}, Lines: {sum(1 for line in simulation.lines.values() if line.active)}")
         
         # Restore original max speed if it was changed
         if speed_boosted:
             config.MAX_POINT_SPEED = original_max_speed
+        
+        print(f"Simulation completed full duration: {self.final_duration:.1f}s video time (real time: {elapsed_real_time:.1f}s)")
+        return True
     
     def generate_video(self, num_points=5, attempt_number=1):
         """
@@ -235,13 +246,14 @@ class VideoGenerator:
 def main():
     """Main function to run video generation."""
     # Configuration parameters
-    ENERGY_FACTOR = 1.05  # Can be modified as needed
+    ENERGY_FACTOR = 1.1  # Can be modified as needed
     NUM_POINTS = 5
     NUM_VIDEOS = 100  # Number of successful videos to generate
     VIDEO_WIDTH = 800
     VIDEO_HEIGHT = 600
     VIDEO_FPS = 60
     MAX_ATTEMPTS_PER_VIDEO = 100
+    SIMULATION_SPEED_MULTIPLIER = 4.0  # How much faster to run simulation (4x = 17.5 min real time for 70s video)
     
     print("Point Collision Simulation - Video Generator")
     print("=" * 50)
@@ -249,6 +261,7 @@ def main():
     print("- Must survive 60+ seconds with at least 2 points")
     print("- Speed cap removed at 60s for final 10s of chaos")
     print("- Simulations with <2 points before 60s are discarded")
+    print(f"- Simulation speed: {SIMULATION_SPEED_MULTIPLIER}x (faster generation)")
     print("-" * 50)
     
     # Create video generator
@@ -256,7 +269,8 @@ def main():
         energy_factor=ENERGY_FACTOR,
         width=VIDEO_WIDTH,
         height=VIDEO_HEIGHT,
-        fps=VIDEO_FPS
+        fps=VIDEO_FPS,
+        simulation_speed_multiplier=SIMULATION_SPEED_MULTIPLIER
     )
     
     # Generate videos
