@@ -47,6 +47,8 @@ LINE_ALPHA = 200  # Transparency of lines (0-255, 255 = opaque)
 
 # Line collision detection
 LINE_COLLISION_TOLERANCE = 5  # Distance tolerance for point-line intersection detection
+LINE_COLLISION_SUBDIVISIONS = 10  # Number of subdivisions for path-based collision detection
+MIN_LINE_SEGMENT_LENGTH = 2  # Minimum length for line segment collision detection
 
 # =============================================================================
 # PHYSICS SETTINGS

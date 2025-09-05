@@ -28,7 +28,7 @@ class Line:
         return None, None
     
     def check_point_intersection(self, point, center_x, center_y, radius, points):
-        """Check if a point crosses this line."""
+        """Check if a point crosses this line using path-based collision detection."""
         if not self.active:
             return False
         
@@ -39,32 +39,85 @@ class Line:
         if point_x is None or point_y is None:
             return False
         
+        # Get movement path of the crossing point
+        prev_cross_x, prev_cross_y, curr_cross_x, curr_cross_y = point.get_movement_path()
+        
+        # Check both current position and movement path
+        return (self._check_position_intersection(curr_cross_x, curr_cross_y, point_x, point_y, wall_x, wall_y) or
+                self._check_path_intersection(prev_cross_x, prev_cross_y, curr_cross_x, curr_cross_y, 
+                                            point_x, point_y, wall_x, wall_y))
+    
+    def _check_position_intersection(self, cross_x, cross_y, point_x, point_y, wall_x, wall_y):
+        """Check if a position intersects with the line."""
         # Calculate distance from crossing point to line (from point to wall)
         line_length = math.sqrt((wall_x - point_x)**2 + (wall_y - point_y)**2)
-        if line_length < 1:  # Line too short
+        if line_length < config.MIN_LINE_SEGMENT_LENGTH:
             return False
         
         # Vector from point to wall
         line_dx = wall_x - point_x
         line_dy = wall_y - point_y
         
-        # Vector from point to crossing point
-        cross_dx = point.x - point_x
-        cross_dy = point.y - point_y
+        # Vector from point to crossing position
+        cross_dx = cross_x - point_x
+        cross_dy = cross_y - point_y
         
-        # Project crossing point onto line
+        # Project crossing position onto line
         dot_product = (cross_dx * line_dx + cross_dy * line_dy) / (line_length * line_length)
         
-        # Closest point on line to the crossing point
+        # Check if projection is within line bounds
+        if dot_product < 0 or dot_product > 1:
+            return False
+        
+        # Closest point on line to the crossing position
         closest_x = point_x + dot_product * line_dx
         closest_y = point_y + dot_product * line_dy
         
-        # Distance from crossing point to line
-        distance = math.sqrt((point.x - closest_x)**2 + (point.y - closest_y)**2)
+        # Distance from crossing position to line
+        distance = math.sqrt((cross_x - closest_x)**2 + (cross_y - closest_y)**2)
         
-        # Check if point is close enough to line and within line bounds
-        if distance <= config.LINE_COLLISION_TOLERANCE and 0 <= dot_product <= 1:
-            return True
+        return distance <= config.LINE_COLLISION_TOLERANCE
+    
+    def _check_path_intersection(self, prev_x, prev_y, curr_x, curr_y, point_x, point_y, wall_x, wall_y):
+        """Check if the movement path intersects with the line using line-line intersection."""
+        # Use subdivisions to check multiple points along the path for high-speed movements
+        subdivisions = config.LINE_COLLISION_SUBDIVISIONS
+        
+        for i in range(subdivisions + 1):
+            t = i / subdivisions
+            # Interpolate position along movement path
+            interp_x = prev_x + t * (curr_x - prev_x)
+            interp_y = prev_y + t * (curr_y - prev_y)
+            
+            if self._check_position_intersection(interp_x, interp_y, point_x, point_y, wall_x, wall_y):
+                return True
+        
+        # Additionally, check for direct line-line intersection
+        return self._check_line_line_intersection(prev_x, prev_y, curr_x, curr_y, point_x, point_y, wall_x, wall_y)
+    
+    def _check_line_line_intersection(self, x1, y1, x2, y2, x3, y3, x4, y4):
+        """Check if two line segments intersect using parametric equations."""
+        # Line 1: movement path (x1,y1) to (x2,y2)
+        # Line 2: connection line (x3,y3) to (x4,y4)
+        
+        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(denom) < 1e-10:  # Lines are parallel
+            return False
+        
+        # Calculate intersection parameters
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+        u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+        
+        # Check if intersection occurs within both line segments
+        if 0 <= t <= 1 and 0 <= u <= 1:
+            # Calculate intersection point
+            intersection_x = x1 + t * (x2 - x1)
+            intersection_y = y1 + t * (y2 - y1)
+            
+            # Verify intersection is within tolerance (accounting for point radius)
+            movement_length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            if movement_length > 0:
+                return True
         
         return False
 
@@ -90,6 +143,10 @@ class Point:
         
         # Line management
         self.line_ids = []  # IDs of lines belonging to this point
+        
+        # Movement tracking for robust collision detection
+        self.prev_x = x
+        self.prev_y = y
     
     def validate_values(self):
         """Ensure all values are valid (not NaN or infinity)."""
@@ -109,6 +166,10 @@ class Point:
     
     def update(self, dt):
         """Update position based on velocity."""
+        # Store previous position for collision detection
+        self.prev_x = self.x
+        self.prev_y = self.y
+        
         # Limit dt to prevent large jumps
         dt = min(dt, config.MAX_TIME_STEP)
         
@@ -117,6 +178,10 @@ class Point:
         
         # Validate values after update
         self.validate_values()
+    
+    def get_movement_path(self):
+        """Get the movement path from previous to current position."""
+        return self.prev_x, self.prev_y, self.x, self.y
     
     def get_speed(self):
         """Get current speed magnitude."""
@@ -262,26 +327,99 @@ class CircleSimulation:
             point.line_ids.append(line_id)
     
     def check_line_collisions(self):
-        """Check if any points cross lines of different colors."""
+        """Check if any points cross lines of different colors using robust collision detection."""
         lines_to_remove = []
         
-        for line_id, line in self.lines.items():
-            if not line.active:
-                continue
+        # Create a list of all active lines for more efficient checking
+        active_lines = [(line_id, line) for line_id, line in self.lines.items() if line.active]
+        
+        # Check each point against all lines
+        for point in self.points:
+            # Skip if point has minimal movement (optimization)
+            movement_distance = math.sqrt((point.x - point.prev_x)**2 + (point.y - point.prev_y)**2)
             
-            for point in self.points:
+            for line_id, line in active_lines:
                 # Don't check collision with own lines
                 if point.id == line.point_id:
                     continue
                 
-                # Check if point crosses this line
-                if line.check_point_intersection(point, self.center_x, self.center_y, self.circle_radius, self.points):
+                # Skip if line is already marked for removal
+                if line_id in lines_to_remove:
+                    continue
+                
+                # Enhanced collision detection
+                if self._enhanced_line_collision_check(point, line, line_id):
                     # Line collision detected - mark line for removal
                     line.active = False
                     lines_to_remove.append(line_id)
-                    break
         
         # Remove inactive lines
+        self._remove_lines(lines_to_remove)
+    
+    def _enhanced_line_collision_check(self, point, line, line_id):
+        """Perform enhanced collision checking with multiple strategies."""
+        # Strategy 1: Standard intersection check
+        if line.check_point_intersection(point, self.center_x, self.center_y, self.circle_radius, self.points):
+            return True
+        
+        # Strategy 2: Check if point is about to cross line (predictive)
+        if self._predictive_collision_check(point, line):
+            return True
+        
+        # Strategy 3: Check for high-speed tunneling
+        if self._tunneling_check(point, line):
+            return True
+        
+        return False
+    
+    def _predictive_collision_check(self, point, line):
+        """Check if point will cross line in the next frame."""
+        # Get line endpoints
+        wall_x, wall_y = line.get_wall_position(self.center_x, self.center_y, self.circle_radius)
+        point_x, point_y = line.get_point_position(self.points)
+        
+        if point_x is None or point_y is None:
+            return False
+        
+        # Predict next position
+        next_dt = 1.0 / config.FPS  # Assume consistent frame rate
+        next_x = point.x + point.vx * next_dt
+        next_y = point.y + point.vy * next_dt
+        
+        # Check if predicted path would cross the line
+        return line._check_line_line_intersection(point.x, point.y, next_x, next_y, point_x, point_y, wall_x, wall_y)
+    
+    def _tunneling_check(self, point, line):
+        """Check for high-speed tunneling through lines."""
+        # Get movement distance
+        movement_distance = math.sqrt((point.x - point.prev_x)**2 + (point.y - point.prev_y)**2)
+        
+        # If movement is very large relative to collision tolerance, use finer subdivision
+        if movement_distance > config.LINE_COLLISION_TOLERANCE * 2:
+            # Get line endpoints
+            wall_x, wall_y = line.get_wall_position(self.center_x, self.center_y, self.circle_radius)
+            point_x, point_y = line.get_point_position(self.points)
+            
+            if point_x is None or point_y is None:
+                return False
+            
+            # Use higher subdivision count for very fast movements
+            subdivisions = max(config.LINE_COLLISION_SUBDIVISIONS, int(movement_distance / config.LINE_COLLISION_TOLERANCE))
+            subdivisions = min(subdivisions, 50)  # Cap to prevent performance issues
+            
+            for i in range(subdivisions + 1):
+                t = i / subdivisions
+                # Interpolate position along movement path
+                interp_x = point.prev_x + t * (point.x - point.prev_x)
+                interp_y = point.prev_y + t * (point.y - point.prev_y)
+                
+                if line._check_position_intersection(interp_x, interp_y, point_x, point_y, wall_x, wall_y):
+                    return True
+        
+        return False
+    
+    def _remove_lines(self, lines_to_remove):
+        """Efficiently remove multiple lines."""
         for line_id in lines_to_remove:
             if line_id in self.lines:
                 line = self.lines[line_id]
@@ -484,11 +622,11 @@ class CircleSimulation:
             point2.validate_values()
     
     def update_physics(self, dt):
-        """Update all physics calculations."""
+        """Update all physics calculations with robust collision detection."""
         # Limit time step to prevent instability
         dt = min(dt, config.MAX_TIME_STEP)
         
-        # Update point positions
+        # Update point positions (this stores previous positions automatically)
         for point in self.points:
             point.update(dt)
         
@@ -500,8 +638,14 @@ class CircleSimulation:
             if (point.x < -config.BOUNDS_BUFFER or point.x > self.width + config.BOUNDS_BUFFER or 
                 point.y < -config.BOUNDS_BUFFER or point.y > self.height + config.BOUNDS_BUFFER):
                 # Reset point to center if it goes too far out of bounds
+                point.prev_x = self.center_x  # Update previous position too
+                point.prev_y = self.center_y
                 point.x = self.center_x + random.uniform(-config.RESET_RANDOMNESS, config.RESET_RANDOMNESS)
                 point.y = self.center_y + random.uniform(-config.RESET_RANDOMNESS, config.RESET_RANDOMNESS)
+        
+        # Check line collisions FIRST (before new lines are generated)
+        # This ensures we catch all crossings before positions change further
+        self.check_line_collisions()
         
         # Check circle collisions (which may generate new lines)
         for point in self.points:
@@ -512,7 +656,8 @@ class CircleSimulation:
             for j in range(i + 1, len(self.points)):
                 self.check_point_collision(self.points[i], self.points[j])
         
-        # Check line collisions (points crossing lines of different colors)
+        # Check line collisions again after all position changes
+        # This catches any new crossings created by collision responses
         self.check_line_collisions()
         
         # Remove points that have no more lines
