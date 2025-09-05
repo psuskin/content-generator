@@ -38,6 +38,17 @@ POINT_COLOR_MIN = 100
 POINT_COLOR_MAX = 255
 
 # =============================================================================
+# LINE SYSTEM SETTINGS
+# =============================================================================
+LINES_PER_POINT = 3  # Number of lines connecting each point to the wall
+LINE_ARC_DEGREES = 6  # Arc length in degrees between adjacent lines
+LINE_WIDTH = 2  # Thickness of the lines drawn to the wall
+LINE_ALPHA = 200  # Transparency of lines (0-255, 255 = opaque)
+
+# Line collision detection
+LINE_COLLISION_TOLERANCE = 5  # Distance tolerance for point-line intersection detection
+
+# =============================================================================
 # PHYSICS SETTINGS
 # =============================================================================
 MAX_TIME_STEP = 0.016  # Maximum time step (16ms) to prevent instability

@@ -4,11 +4,81 @@ import random
 import math
 import config
 
+class Line:
+    """
+    Represents a line connecting a point to the wall.
+    """
+    def __init__(self, point_id, wall_angle, color):
+        self.point_id = point_id  # ID of the point this line belongs to
+        self.wall_angle = wall_angle  # Angle on wall where line connects (fixed)
+        self.color = color  # Same color as the point
+        self.active = True  # Whether the line is still active
+    
+    def get_wall_position(self, center_x, center_y, radius):
+        """Get the position on the wall where this line connects."""
+        wall_x = center_x + radius * math.cos(self.wall_angle)
+        wall_y = center_y + radius * math.sin(self.wall_angle)
+        return wall_x, wall_y
+    
+    def get_point_position(self, points):
+        """Get the current position of the point this line belongs to."""
+        for point in points:
+            if point.id == self.point_id:
+                return point.x, point.y
+        return None, None
+    
+    def check_point_intersection(self, point, center_x, center_y, radius, points):
+        """Check if a point crosses this line."""
+        if not self.active:
+            return False
+        
+        # Get current positions
+        wall_x, wall_y = self.get_wall_position(center_x, center_y, radius)
+        point_x, point_y = self.get_point_position(points)
+        
+        if point_x is None or point_y is None:
+            return False
+        
+        # Calculate distance from crossing point to line (from point to wall)
+        line_length = math.sqrt((wall_x - point_x)**2 + (wall_y - point_y)**2)
+        if line_length < 1:  # Line too short
+            return False
+        
+        # Vector from point to wall
+        line_dx = wall_x - point_x
+        line_dy = wall_y - point_y
+        
+        # Vector from point to crossing point
+        cross_dx = point.x - point_x
+        cross_dy = point.y - point_y
+        
+        # Project crossing point onto line
+        dot_product = (cross_dx * line_dx + cross_dy * line_dy) / (line_length * line_length)
+        
+        # Closest point on line to the crossing point
+        closest_x = point_x + dot_product * line_dx
+        closest_y = point_y + dot_product * line_dy
+        
+        # Distance from crossing point to line
+        distance = math.sqrt((point.x - closest_x)**2 + (point.y - closest_y)**2)
+        
+        # Check if point is close enough to line and within line bounds
+        if distance <= config.LINE_COLLISION_TOLERANCE and 0 <= dot_product <= 1:
+            return True
+        
+        return False
+
 class Point:
     """
     Represents a point in the simulation with position, velocity, and physics properties.
     """
+    _id_counter = 0  # Class variable for unique IDs
+    
     def __init__(self, x, y, vx, vy, radius=None, color=(255, 255, 255)):
+        # Assign unique ID
+        Point._id_counter += 1
+        self.id = Point._id_counter
+        
         self.x = x
         self.y = y
         self.vx = vx
@@ -17,6 +87,9 @@ class Point:
         self.color = color
         self.mass = config.POINT_MASS
         self.max_speed = config.MAX_POINT_SPEED
+        
+        # Line management
+        self.line_ids = []  # IDs of lines belonging to this point
     
     def validate_values(self):
         """Ensure all values are valid (not NaN or infinity)."""
@@ -96,8 +169,10 @@ class CircleSimulation:
         self.center_y = self.height // 2
         self.circle_radius = min(self.width, self.height) // 2 - config.CIRCLE_MARGIN
         
-        # Initialize points
+        # Initialize points and lines
         self.points = []
+        self.lines = {}  # Dictionary mapping line_id to Line object
+        self.line_id_counter = 0
         self.generate_points()
         
         # Clock for consistent frame rate
@@ -110,6 +185,10 @@ class CircleSimulation:
     def generate_points(self):
         """Generate points with random positions and velocities, ensuring minimum distance."""
         self.points.clear()
+        self.lines.clear()
+        self.line_id_counter = 0
+        Point._id_counter = 0  # Reset point ID counter
+        
         min_distance = config.MIN_DISTANCE_BETWEEN_POINTS
         max_attempts = config.MAX_PLACEMENT_ATTEMPTS
         
@@ -148,12 +227,96 @@ class CircleSimulation:
                     
                     point = Point(x, y, vx, vy, color=color)
                     self.points.append(point)
+                    
+                    # Generate initial lines for this point
+                    self.generate_lines_for_point(point)
+                    
                     placed = True
                 
                 attempts += 1
             
             if not placed:
                 print(f"Warning: Could not place point {i+1} after {max_attempts} attempts")
+    
+    def generate_lines_for_point(self, point):
+        """Generate initial lines connecting a point to the wall."""
+        # Find the closest point on the wall (minimum distance)
+        dx = point.x - self.center_x
+        dy = point.y - self.center_y
+        center_angle = math.atan2(dy, dx)
+        
+        # Generate three lines: center and two at arc offsets
+        arc_offset = math.radians(config.LINE_ARC_DEGREES)
+        wall_angles = [
+            center_angle - arc_offset,  # Left line
+            center_angle,               # Center line
+            center_angle + arc_offset   # Right line
+        ]
+        
+        for wall_angle in wall_angles:
+            line_id = self.line_id_counter
+            self.line_id_counter += 1
+            
+            line = Line(point.id, wall_angle, point.color)
+            self.lines[line_id] = line
+            point.line_ids.append(line_id)
+    
+    def check_line_collisions(self):
+        """Check if any points cross lines of different colors."""
+        lines_to_remove = []
+        
+        for line_id, line in self.lines.items():
+            if not line.active:
+                continue
+            
+            for point in self.points:
+                # Don't check collision with own lines
+                if point.id == line.point_id:
+                    continue
+                
+                # Check if point crosses this line
+                if line.check_point_intersection(point, self.center_x, self.center_y, self.circle_radius, self.points):
+                    # Line collision detected - mark line for removal
+                    line.active = False
+                    lines_to_remove.append(line_id)
+                    break
+        
+        # Remove inactive lines
+        for line_id in lines_to_remove:
+            if line_id in self.lines:
+                line = self.lines[line_id]
+                # Remove line ID from the point's line list
+                for point in self.points:
+                    if point.id == line.point_id and line_id in point.line_ids:
+                        point.line_ids.remove(line_id)
+                        break
+                del self.lines[line_id]
+    
+    def remove_points_without_lines(self):
+        """Remove points that have no more lines connecting them to the wall."""
+        points_to_remove = []
+        
+        for point in self.points:
+            # Count active lines for this point
+            active_lines = sum(1 for line_id in point.line_ids if line_id in self.lines and self.lines[line_id].active)
+            
+            if active_lines == 0:
+                points_to_remove.append(point)
+        
+        # Remove points and their remaining line references
+        for point in points_to_remove:
+            # Remove all lines belonging to this point
+            lines_to_remove = []
+            for line_id, line in self.lines.items():
+                if line.point_id == point.id:
+                    lines_to_remove.append(line_id)
+            
+            for line_id in lines_to_remove:
+                del self.lines[line_id]
+            
+            # Remove point from points list
+            self.points.remove(point)
+            self.num_points = len(self.points)
     
     def check_circle_collision(self, point):
         """Check and handle collision with circle boundary."""
@@ -206,8 +369,34 @@ class CircleSimulation:
                 point.x = self.center_x + safe_radius * math.cos(angle)
                 point.y = self.center_y + safe_radius * math.sin(angle)
             
+            # Generate new lines at collision point
+            self.generate_collision_lines(point)
+            
             # Final validation
             point.validate_values()
+    
+    def generate_collision_lines(self, point):
+        """Generate three new lines when a point collides with the wall."""
+        # Calculate collision angle on the wall
+        dx = point.x - self.center_x
+        dy = point.y - self.center_y
+        collision_angle = math.atan2(dy, dx)
+        
+        # Generate three lines: center at collision point and two at arc offsets
+        arc_offset = math.radians(config.LINE_ARC_DEGREES)
+        wall_angles = [
+            collision_angle - arc_offset,  # Left line
+            collision_angle,               # Center line (at collision point)
+            collision_angle + arc_offset   # Right line
+        ]
+        
+        for wall_angle in wall_angles:
+            line_id = self.line_id_counter
+            self.line_id_counter += 1
+            
+            line = Line(point.id, wall_angle, point.color)
+            self.lines[line_id] = line
+            point.line_ids.append(line_id)
     
     def check_point_collision(self, point1, point2):
         """Check and handle collision between two points."""
@@ -314,7 +503,7 @@ class CircleSimulation:
                 point.x = self.center_x + random.uniform(-config.RESET_RANDOMNESS, config.RESET_RANDOMNESS)
                 point.y = self.center_y + random.uniform(-config.RESET_RANDOMNESS, config.RESET_RANDOMNESS)
         
-        # Check circle collisions
+        # Check circle collisions (which may generate new lines)
         for point in self.points:
             self.check_circle_collision(point)
         
@@ -322,6 +511,12 @@ class CircleSimulation:
         for i in range(len(self.points)):
             for j in range(i + 1, len(self.points)):
                 self.check_point_collision(self.points[i], self.points[j])
+        
+        # Check line collisions (points crossing lines of different colors)
+        self.check_line_collisions()
+        
+        # Remove points that have no more lines
+        self.remove_points_without_lines()
     
     def render(self):
         """Render the simulation."""
@@ -336,6 +531,9 @@ class CircleSimulation:
             self.circle_radius, 
             config.CIRCLE_BOUNDARY_WIDTH
         )
+        
+        # Draw lines from points to wall
+        self.render_lines()
         
         # Draw points
         for point in self.points:
@@ -366,6 +564,37 @@ class CircleSimulation:
         
         pygame.display.flip()
     
+    def render_lines(self):
+        """Render all active lines connecting points to the wall."""
+        for line_id, line in self.lines.items():
+            if not line.active:
+                continue
+            
+            try:
+                # Get wall position
+                wall_x, wall_y = line.get_wall_position(self.center_x, self.center_y, self.circle_radius)
+                
+                # Get current point position
+                point_x, point_y = line.get_point_position(self.points)
+                
+                # Ensure coordinates are valid
+                if not (math.isfinite(wall_x) and math.isfinite(wall_y) and 
+                       point_x is not None and point_y is not None and
+                       math.isfinite(point_x) and math.isfinite(point_y)):
+                    continue
+                
+                # Draw line from point to wall
+                pygame.draw.line(
+                    self.screen,
+                    line.color,
+                    (int(point_x), int(point_y)),
+                    (int(wall_x), int(wall_y)),
+                    config.LINE_WIDTH
+                )
+            except (TypeError, ValueError, OverflowError):
+                # If there's any error drawing, skip this line
+                continue
+    
     def render_ui(self):
         """Render UI elements (statistics and controls)."""
         # Draw UI information
@@ -377,6 +606,12 @@ class CircleSimulation:
         
         points_text = self.font.render(f"Points: {len(self.points)}", True, config.UI_TEXT_COLOR)
         self.screen.blit(points_text, (config.UI_MARGIN, y_offset))
+        y_offset += config.UI_STATS_SPACING
+        
+        # Show active lines count
+        active_lines = sum(1 for line in self.lines.values() if line.active)
+        lines_text = self.font.render(f"Lines: {active_lines}", True, config.UI_TEXT_COLOR)
+        self.screen.blit(lines_text, (config.UI_MARGIN, y_offset))
         y_offset += config.UI_STATS_SPACING
         
         # Calculate average speed
