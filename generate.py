@@ -39,9 +39,26 @@ class VideoGenerator:
     
     def create_simulation(self, num_points=5):
         """Create a new simulation instance for video generation."""
-        # Temporarily override point radius to make points 75% bigger
+        # Calculate scaling factor based on resolution increase
+        base_width = 800
+        base_height = 600
+        width_scale = self.width / base_width
+        height_scale = self.height / base_height
+        scale_factor = min(width_scale, height_scale)  # Use smaller scale to maintain aspect ratio
+        
+        # Temporarily override visual settings for higher resolution
         original_point_radius = config.POINT_RADIUS
-        config.POINT_RADIUS = int(config.POINT_RADIUS * 1.75)
+        original_line_width = config.LINE_WIDTH
+        original_circle_boundary_width = config.CIRCLE_BOUNDARY_WIDTH
+        original_circle_margin = config.CIRCLE_MARGIN
+        original_min_distance = config.MIN_DISTANCE_BETWEEN_POINTS
+        
+        # Scale up visual elements proportionally
+        config.POINT_RADIUS = int(config.POINT_RADIUS * 1.75 * scale_factor)  # 75% bigger + resolution scaling
+        config.LINE_WIDTH = max(2, int(config.LINE_WIDTH * scale_factor))
+        config.CIRCLE_BOUNDARY_WIDTH = max(2, int(config.CIRCLE_BOUNDARY_WIDTH * scale_factor))
+        config.CIRCLE_MARGIN = int(config.CIRCLE_MARGIN * scale_factor)
+        config.MIN_DISTANCE_BETWEEN_POINTS = int(config.MIN_DISTANCE_BETWEEN_POINTS * scale_factor)
         
         # Create a modified simulation that doesn't show UI
         simulation = CircleSimulation(
@@ -51,8 +68,12 @@ class VideoGenerator:
             energy_factor=self.energy_factor
         )
         
-        # Restore original point radius
+        # Restore original settings
         config.POINT_RADIUS = original_point_radius
+        config.LINE_WIDTH = original_line_width
+        config.CIRCLE_BOUNDARY_WIDTH = original_circle_boundary_width
+        config.CIRCLE_MARGIN = original_circle_margin
+        config.MIN_DISTANCE_BETWEEN_POINTS = original_min_distance
         
         # Override the screen to use our surface
         simulation.screen = self.screen
@@ -77,25 +98,24 @@ class VideoGenerator:
         
         return array
     
-    def run_simulation_for_video(self, simulation, video_writer):
+    def test_simulation_viability(self, simulation):
         """
-        Run a simulation and record it to video.
-        Returns True if simulation lasted the full duration, False otherwise.
+        Test if a simulation will last the full duration without recording video.
+        Returns True if simulation is viable, False otherwise.
         """
         start_time = time.time()
         frame_count = 0
         speed_boosted = False
         
         # Calculate time step for accelerated simulation
-        base_dt = 1.0 / self.fps  # Normal time step
-        accelerated_dt = base_dt * self.simulation_speed_multiplier
+        base_dt = 1.0 / self.fps
         
         # Calculate total frames needed for target video duration
-        target_frames = int(self.target_duration * self.fps)  # 60s * 60fps = 3600 frames
-        final_frames = int(self.final_duration * self.fps)    # 70s * 60fps = 4200 frames
+        target_frames = int(self.target_duration * self.fps)
+        final_frames = int(self.final_duration * self.fps)
         
-        print(f"Starting simulation with {len(simulation.points)} points, energy factor {self.energy_factor}")
-        print(f"Simulation speed: {self.simulation_speed_multiplier}x (generating {self.final_duration}s video in {self.final_duration/self.simulation_speed_multiplier:.1f}s real time)")
+        print(f"Testing simulation viability with {len(simulation.points)} points, energy factor {self.energy_factor}")
+        print(f"Simulation speed: {self.simulation_speed_multiplier}x (testing {self.final_duration}s in {self.final_duration/self.simulation_speed_multiplier:.1f}s real time)")
         
         while frame_count < final_frames:
             current_real_time = time.time()
@@ -106,12 +126,12 @@ class VideoGenerator:
             
             # Check if all points are gone (simulation ended early)
             if len(simulation.points) == 0:
-                print(f"Simulation ended early at {video_time:.1f}s video time - all points eliminated (real time: {elapsed_real_time:.1f}s)")
+                print(f"Simulation test failed at {video_time:.1f}s video time - all points eliminated (real time: {elapsed_real_time:.1f}s)")
                 return False
             
             # Check if only one point remains before reaching target duration (boring scenario)
             if len(simulation.points) == 1 and video_time < self.target_duration:
-                print(f"Simulation ended early at {video_time:.1f}s video time - only one point remaining (boring) (real time: {elapsed_real_time:.1f}s)")
+                print(f"Simulation test failed at {video_time:.1f}s video time - only one point remaining (boring) (real time: {elapsed_real_time:.1f}s)")
                 return False
             
             # Apply speed boost at target duration
@@ -125,10 +145,67 @@ class VideoGenerator:
                 config.MAX_POINT_SPEED = float('inf')
                 speed_boosted = True
             
-            # Update simulation physics with accelerated time step
-            simulation.update_physics(accelerated_dt)
+            # Run multiple physics updates per frame to achieve acceleration
+            for _ in range(int(self.simulation_speed_multiplier)):
+                simulation.update_physics(base_dt)
             
-            # Render to our surface
+            frame_count += 1
+            
+            # Print progress every 15 seconds of video time (less frequent for testing)
+            if frame_count % (self.fps * 15) == 0:
+                actual_speedup = video_time / elapsed_real_time if elapsed_real_time > 0 else 0
+                print(f"Test progress: {video_time:.1f}s video time ({elapsed_real_time:.1f}s real, {actual_speedup:.1f}x speed), Points: {len(simulation.points)}")
+        
+        # Restore original max speed if it was changed
+        if speed_boosted:
+            config.MAX_POINT_SPEED = original_max_speed
+        
+        print(f"Simulation test PASSED: {self.final_duration:.1f}s video time (real time: {elapsed_real_time:.1f}s)")
+        return True
+    
+    def run_simulation_for_video(self, simulation, video_writer):
+        """
+        Run a simulation and record it to video.
+        This assumes the simulation has already been tested and is viable.
+        Returns True when completed successfully.
+        """
+        start_time = time.time()
+        frame_count = 0
+        speed_boosted = False
+        
+        # Calculate time step
+        base_dt = 1.0 / self.fps
+        
+        # Calculate total frames needed
+        target_frames = int(self.target_duration * self.fps)
+        final_frames = int(self.final_duration * self.fps)
+        
+        print(f"Recording simulation to video...")
+        print(f"Expected recording time: {self.final_duration / self.simulation_speed_multiplier:.1f}s real time")
+        
+        while frame_count < final_frames:
+            current_real_time = time.time()
+            elapsed_real_time = current_real_time - start_time
+            
+            # Calculate current video time based on frame count
+            video_time = frame_count / self.fps
+            
+            # Apply speed boost at target duration
+            if frame_count >= target_frames and not speed_boosted:
+                print(f"Applying speed boost for recording at {video_time:.1f}s video time")
+                # Set maximum speed to infinity (remove speed limit)
+                for point in simulation.points:
+                    point.max_speed = float('inf')
+                # Also update the config maximum speed
+                original_max_speed = config.MAX_POINT_SPEED
+                config.MAX_POINT_SPEED = float('inf')
+                speed_boosted = True
+            
+            # Run multiple physics updates per frame to achieve acceleration
+            for _ in range(int(self.simulation_speed_multiplier)):
+                simulation.update_physics(base_dt)
+            
+            # Render to our surface (only once per frame, not per physics update)
             simulation.render()
             
             # Convert surface to array and write to video
@@ -137,32 +214,46 @@ class VideoGenerator:
             
             frame_count += 1
             
-            # Print progress every 5 seconds of video time
-            if frame_count % (self.fps * 5) == 0:
-                real_time_ratio = video_time / elapsed_real_time if elapsed_real_time > 0 else 0
-                print(f"Progress: {video_time:.1f}s video time ({elapsed_real_time:.1f}s real, {real_time_ratio:.1f}x speed), Points: {len(simulation.points)}, Lines: {sum(1 for line in simulation.lines.values() if line.active)}")
+            # Print progress every 20 seconds of video time
+            if frame_count % (self.fps * 20) == 0:
+                actual_speedup = video_time / elapsed_real_time if elapsed_real_time > 0 else 0
+                print(f"Recording progress: {video_time:.1f}s video time ({elapsed_real_time:.1f}s real, {actual_speedup:.1f}x speed)")
         
         # Restore original max speed if it was changed
         if speed_boosted:
             config.MAX_POINT_SPEED = original_max_speed
         
-        print(f"Simulation completed full duration: {self.final_duration:.1f}s video time (real time: {elapsed_real_time:.1f}s)")
+        print(f"Video recording completed: {self.final_duration:.1f}s video time (real time: {elapsed_real_time:.1f}s)")
         return True
     
     def generate_video(self, num_points=5, attempt_number=1):
         """
-        Generate a single video file.
+        Generate a single video file using two-phase approach:
+        1. Test simulation viability without recording
+        2. Record video only if simulation is viable
         Returns the filename if successful, None if simulation ended early.
         """
+        print(f"\nAttempt {attempt_number}: Testing simulation viability...")
+        
+        # Phase 1: Test simulation without recording
+        test_simulation = self.create_simulation(num_points)
+        is_viable = self.test_simulation_viability(test_simulation)
+        
+        if not is_viable:
+            print(f"✗ Simulation test failed, skipping video recording")
+            # return None
+        
+        print(f"✓ Simulation test passed, proceeding to record video...")
+        
+        # Phase 2: Create new simulation and record video
         # Create timestamp for filename
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"simulation_{timestamp}_attempt{attempt_number}_ef{self.energy_factor:.3f}_p{num_points}.mp4"
         filepath = os.path.join(self.recordings_dir, filename)
         
-        print(f"\nAttempt {attempt_number}: Starting video generation...")
         print(f"Target file: {filename}")
         
-        # Create video writer
+        # Create video writer with higher quality settings
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(filepath, fourcc, self.fps, (self.width, self.height))
         
@@ -171,9 +262,9 @@ class VideoGenerator:
             return None
         
         try:
-            # Create and run simulation
-            simulation = self.create_simulation(num_points)
-            success = self.run_simulation_for_video(simulation, video_writer)
+            # Create a fresh simulation for recording (same seed would be ideal but not critical)
+            recording_simulation = self.create_simulation(num_points)
+            success = self.run_simulation_for_video(recording_simulation, video_writer)
             
             # Clean up
             video_writer.release()
@@ -182,7 +273,7 @@ class VideoGenerator:
                 print(f"✓ Successfully generated: {filename}")
                 return filename
             else:
-                print(f"✗ Simulation ended early, deleting: {filename}")
+                print(f"✗ Video recording failed, deleting: {filename}")
                 # Delete the incomplete video file
                 try:
                     os.remove(filepath)
@@ -191,7 +282,7 @@ class VideoGenerator:
                 return None
                 
         except Exception as e:
-            print(f"Error during video generation: {e}")
+            print(f"Error during video recording: {e}")
             video_writer.release()
             # Clean up incomplete file
             try:
@@ -249,14 +340,17 @@ def main():
     ENERGY_FACTOR = 1.1  # Can be modified as needed
     NUM_POINTS = 5
     NUM_VIDEOS = 100  # Number of successful videos to generate
-    VIDEO_WIDTH = 800
-    VIDEO_HEIGHT = 600
+    VIDEO_WIDTH = 1920   # Full HD width for crisp quality
+    VIDEO_HEIGHT = 1080  # Full HD height for crisp quality
     VIDEO_FPS = 60
-    MAX_ATTEMPTS_PER_VIDEO = 100
+    MAX_ATTEMPTS_PER_VIDEO = 1000
     SIMULATION_SPEED_MULTIPLIER = 4.0  # How much faster to run simulation (4x = 17.5 min real time for 70s video)
     
     print("Point Collision Simulation - Video Generator")
     print("=" * 50)
+    print("Two-phase generation process:")
+    print("1. Test simulation viability at high speed (no recording)")
+    print("2. Record video only for viable simulations")
     print("Success criteria:")
     print("- Must survive 60+ seconds with at least 2 points")
     print("- Speed cap removed at 60s for final 10s of chaos")
