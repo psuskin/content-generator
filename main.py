@@ -2,31 +2,32 @@ import pygame
 import numpy as np
 import random
 import math
+import config
 
 class Point:
     """
     Represents a point in the simulation with position, velocity, and physics properties.
     """
-    def __init__(self, x, y, vx, vy, radius=10, color=(255, 255, 255)):
+    def __init__(self, x, y, vx, vy, radius=None, color=(255, 255, 255)):
         self.x = x
         self.y = y
         self.vx = vx
         self.vy = vy
-        self.radius = radius
+        self.radius = radius if radius is not None else config.POINT_RADIUS
         self.color = color
-        self.mass = 1.0  # All points have equal mass for simplicity
-        self.max_speed = 2000  # Maximum allowed speed to prevent instability
+        self.mass = config.POINT_MASS
+        self.max_speed = config.MAX_POINT_SPEED
     
     def validate_values(self):
         """Ensure all values are valid (not NaN or infinity)."""
         # Check for NaN or infinity and reset to safe values
         if not (math.isfinite(self.x) and math.isfinite(self.y)):
-            self.x = 400  # Reset to center-ish position
-            self.y = 300
+            self.x = config.SAFE_FALLBACK_X
+            self.y = config.SAFE_FALLBACK_Y
         
         if not (math.isfinite(self.vx) and math.isfinite(self.vy)):
-            self.vx = 0
-            self.vy = 0
+            self.vx = config.SAFE_FALLBACK_SPEED
+            self.vy = config.SAFE_FALLBACK_SPEED
         
         # Clamp speed to maximum
         speed = self.get_speed()
@@ -36,7 +37,7 @@ class Point:
     def update(self, dt):
         """Update position based on velocity."""
         # Limit dt to prevent large jumps
-        dt = min(dt, 0.016)  # Max 16ms time step
+        dt = min(dt, config.MAX_TIME_STEP)
         
         self.x += self.vx * dt
         self.y += self.vy * dt
@@ -57,7 +58,7 @@ class Point:
             speed = 0
         
         current_speed = self.get_speed()
-        if current_speed > 0 and math.isfinite(current_speed):
+        if current_speed > config.MIN_SPEED_EPSILON and math.isfinite(current_speed):
             factor = speed / current_speed
             self.vx *= factor
             self.vy *= factor
@@ -74,23 +75,26 @@ class CircleSimulation:
     """
     Main simulation class handling physics, collisions, and rendering.
     """
-    def __init__(self, width=800, height=600, num_points=5, energy_factor=1.0):
+    def __init__(self, width=None, height=None, num_points=None, energy_factor=None):
         pygame.init()
         
-        self.width = width
-        self.height = height
-        self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption("Point Collision Simulation")
+        self.width = width if width is not None else config.WINDOW_WIDTH
+        self.height = height if height is not None else config.WINDOW_HEIGHT
+        self.screen = pygame.display.set_mode((self.width, self.height))
+        pygame.display.set_caption(config.WINDOW_TITLE)
         
         # Simulation parameters
-        self.num_points = num_points
-        self.energy_factor = energy_factor
-        self.base_speed = 100  # pixels per second
+        self.num_points = num_points if num_points is not None else config.DEFAULT_NUM_POINTS
+        self.energy_factor = energy_factor if energy_factor is not None else config.DEFAULT_ENERGY_FACTOR
+        self.base_speed = config.BASE_SPEED
+        
+        # UI state
+        self.show_ui = True  # Toggle for showing/hiding UI
         
         # Circle boundary
-        self.center_x = width // 2
-        self.center_y = height // 2
-        self.circle_radius = min(width, height) // 2 - 50
+        self.center_x = self.width // 2
+        self.center_y = self.height // 2
+        self.circle_radius = min(self.width, self.height) // 2 - config.CIRCLE_MARGIN
         
         # Initialize points
         self.points = []
@@ -101,13 +105,13 @@ class CircleSimulation:
         self.running = True
         
         # Font for UI
-        self.font = pygame.font.Font(None, 36)
+        self.font = pygame.font.Font(None, config.UI_FONT_SIZE)
     
     def generate_points(self):
         """Generate points with random positions and velocities, ensuring minimum distance."""
         self.points.clear()
-        min_distance = 50  # Increased minimum distance for larger points
-        max_attempts = 1000
+        min_distance = config.MIN_DISTANCE_BETWEEN_POINTS
+        max_attempts = config.MAX_PLACEMENT_ATTEMPTS
         
         for i in range(self.num_points):
             placed = False
@@ -116,7 +120,7 @@ class CircleSimulation:
             while not placed and attempts < max_attempts:
                 # Generate random position within circle
                 angle = random.uniform(0, 2 * math.pi)
-                radius = random.uniform(0, self.circle_radius - 30)  # More margin for larger points
+                radius = random.uniform(0, self.circle_radius - config.POINT_RADIUS - 10)
                 
                 x = self.center_x + radius * math.cos(angle)
                 y = self.center_y + radius * math.sin(angle)
@@ -137,9 +141,9 @@ class CircleSimulation:
                     
                     # Create point with random color
                     color = (
-                        random.randint(100, 255),
-                        random.randint(100, 255),
-                        random.randint(100, 255)
+                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX),
+                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX),
+                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX)
                     )
                     
                     point = Point(x, y, vx, vy, color=color)
@@ -185,7 +189,7 @@ class CircleSimulation:
             new_speed = current_speed * self.energy_factor
             
             # Limit maximum speed increase per collision
-            max_speed_increase = current_speed * 1.5  # Max 50% increase per collision
+            max_speed_increase = current_speed * config.MAX_SPEED_INCREASE_PER_COLLISION
             new_speed = min(new_speed, max_speed_increase)
             
             point.set_speed(new_speed)
@@ -217,8 +221,8 @@ class CircleSimulation:
         
         if distance < point1.radius + point2.radius:
             # Collision detected
-            if distance < 0.1:  # Very close or overlapping
-                distance = 0.1
+            if distance < config.MIN_DISTANCE_EPSILON:
+                distance = config.MIN_DISTANCE_EPSILON
                 # Use random separation direction
                 angle = random.uniform(0, 2 * math.pi)
                 dx = distance * math.cos(angle)
@@ -247,7 +251,7 @@ class CircleSimulation:
             impulse = 2 * dvn / (point1.mass + point2.mass)
             
             # Limit impulse to prevent extreme velocity changes
-            max_impulse = 500  # Limit impulse magnitude
+            max_impulse = config.MAX_IMPULSE
             impulse = max(-max_impulse, min(max_impulse, impulse))
             
             # Update velocities
@@ -264,8 +268,8 @@ class CircleSimulation:
             new_speed2 = current_speed2 * self.energy_factor
             
             # Limit maximum speed increase per collision
-            max_speed_increase1 = current_speed1 * 1.5
-            max_speed_increase2 = current_speed2 * 1.5
+            max_speed_increase1 = current_speed1 * config.MAX_SPEED_INCREASE_PER_COLLISION
+            max_speed_increase2 = current_speed2 * config.MAX_SPEED_INCREASE_PER_COLLISION
             
             new_speed1 = min(new_speed1, max_speed_increase1)
             new_speed2 = min(new_speed2, max_speed_increase2)
@@ -278,7 +282,7 @@ class CircleSimulation:
             separation = overlap / 2
             
             # Limit separation to prevent extreme position changes
-            max_separation = 20
+            max_separation = config.MAX_SEPARATION
             separation = min(separation, max_separation)
             
             point1.x -= separation * nx
@@ -293,7 +297,7 @@ class CircleSimulation:
     def update_physics(self, dt):
         """Update all physics calculations."""
         # Limit time step to prevent instability
-        dt = min(dt, 0.016)  # Max 16ms time step
+        dt = min(dt, config.MAX_TIME_STEP)
         
         # Update point positions
         for point in self.points:
@@ -304,11 +308,11 @@ class CircleSimulation:
             point.validate_values()
             
             # Keep points within reasonable bounds
-            if (point.x < -100 or point.x > self.width + 100 or 
-                point.y < -100 or point.y > self.height + 100):
+            if (point.x < -config.BOUNDS_BUFFER or point.x > self.width + config.BOUNDS_BUFFER or 
+                point.y < -config.BOUNDS_BUFFER or point.y > self.height + config.BOUNDS_BUFFER):
                 # Reset point to center if it goes too far out of bounds
-                point.x = self.center_x + random.uniform(-50, 50)
-                point.y = self.center_y + random.uniform(-50, 50)
+                point.x = self.center_x + random.uniform(-config.RESET_RANDOMNESS, config.RESET_RANDOMNESS)
+                point.y = self.center_y + random.uniform(-config.RESET_RANDOMNESS, config.RESET_RANDOMNESS)
         
         # Check circle collisions
         for point in self.points:
@@ -322,15 +326,15 @@ class CircleSimulation:
     def render(self):
         """Render the simulation."""
         # Clear screen
-        self.screen.fill((0, 0, 0))
+        self.screen.fill(config.BACKGROUND_COLOR)
         
         # Draw circle boundary
         pygame.draw.circle(
             self.screen, 
-            (100, 100, 100), 
+            config.CIRCLE_BOUNDARY_COLOR, 
             (self.center_x, self.center_y), 
             self.circle_radius, 
-            2
+            config.CIRCLE_BOUNDARY_WIDTH
         )
         
         # Draw points
@@ -339,12 +343,12 @@ class CircleSimulation:
             try:
                 x = int(point.x) if math.isfinite(point.x) else self.center_x
                 y = int(point.y) if math.isfinite(point.y) else self.center_y
-                radius = int(point.radius) if math.isfinite(point.radius) else 10
+                radius = int(point.radius) if math.isfinite(point.radius) else config.POINT_RADIUS
                 
                 # Clamp coordinates to screen bounds (with some buffer)
-                x = max(-100, min(self.width + 100, x))
-                y = max(-100, min(self.height + 100, y))
-                radius = max(1, min(50, radius))
+                x = max(-config.BOUNDS_BUFFER, min(self.width + config.BOUNDS_BUFFER, x))
+                y = max(-config.BOUNDS_BUFFER, min(self.height + config.BOUNDS_BUFFER, y))
+                radius = max(config.MIN_RENDER_RADIUS, min(config.MAX_RENDER_RADIUS, radius))
                 
                 pygame.draw.circle(
                     self.screen,
@@ -356,12 +360,24 @@ class CircleSimulation:
                 # If there's any error drawing, skip this point
                 continue
         
-        # Draw UI information
-        energy_text = self.font.render(f"Energy Factor: {self.energy_factor:.2f}", True, (255, 255, 255))
-        self.screen.blit(energy_text, (10, 10))
+        # Draw UI if enabled
+        if self.show_ui:
+            self.render_ui()
         
-        points_text = self.font.render(f"Points: {len(self.points)}", True, (255, 255, 255))
-        self.screen.blit(points_text, (10, 50))
+        pygame.display.flip()
+    
+    def render_ui(self):
+        """Render UI elements (statistics and controls)."""
+        # Draw UI information
+        y_offset = config.UI_MARGIN
+        
+        energy_text = self.font.render(f"Energy Factor: {self.energy_factor:.2f}", True, config.UI_TEXT_COLOR)
+        self.screen.blit(energy_text, (config.UI_MARGIN, y_offset))
+        y_offset += config.UI_STATS_SPACING
+        
+        points_text = self.font.render(f"Points: {len(self.points)}", True, config.UI_TEXT_COLOR)
+        self.screen.blit(points_text, (config.UI_MARGIN, y_offset))
+        y_offset += config.UI_STATS_SPACING
         
         # Calculate average speed
         if self.points:
@@ -373,29 +389,21 @@ class CircleSimulation:
             
             if valid_speeds:
                 avg_speed = sum(valid_speeds) / len(valid_speeds)
-                speed_text = self.font.render(f"Avg Speed: {avg_speed:.1f}", True, (255, 255, 255))
-                self.screen.blit(speed_text, (10, 90))
+                speed_text = self.font.render(f"Avg Speed: {avg_speed:.1f}", True, config.UI_TEXT_COLOR)
+                self.screen.blit(speed_text, (config.UI_MARGIN, y_offset))
+                y_offset += config.UI_STATS_SPACING
                 
                 # Show max speed as well
                 max_speed = max(valid_speeds)
-                max_speed_text = self.font.render(f"Max Speed: {max_speed:.1f}", True, (255, 255, 255))
-                self.screen.blit(max_speed_text, (10, 130))
+                max_speed_text = self.font.render(f"Max Speed: {max_speed:.1f}", True, config.UI_TEXT_COLOR)
+                self.screen.blit(max_speed_text, (config.UI_MARGIN, y_offset))
         
         # Draw controls
-        controls = [
-            "Controls:",
-            "↑/↓: Adjust energy factor",
-            "+/-: Add/remove points",
-            "R: Reset simulation",
-            "ESC: Exit"
-        ]
-        
-        for i, control in enumerate(controls):
-            color = (200, 200, 200) if i == 0 else (150, 150, 150)
+        controls_start_y = self.height - config.CONTROLS_FROM_BOTTOM
+        for i, control in enumerate(config.CONTROLS):
+            color = config.UI_TITLE_COLOR if i == 0 else config.UI_SECONDARY_COLOR
             control_text = self.font.render(control, True, color)
-            self.screen.blit(control_text, (10, self.height - 150 + i * 25))
-        
-        pygame.display.flip()
+            self.screen.blit(control_text, (config.UI_MARGIN, controls_start_y + i * config.CONTROLS_LINE_HEIGHT))
     
     def handle_events(self):
         """Handle user input events."""
@@ -404,32 +412,37 @@ class CircleSimulation:
                 self.running = False
             
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if event.key == config.KEY_EXIT:
                     self.running = False
                 
-                elif event.key == pygame.K_UP:
-                    self.energy_factor = min(2.0, self.energy_factor + 0.05)
+                elif event.key == config.KEY_ENERGY_UP:
+                    self.energy_factor = min(config.MAX_ENERGY_FACTOR, 
+                                           self.energy_factor + config.ENERGY_FACTOR_STEP)
                 
-                elif event.key == pygame.K_DOWN:
-                    self.energy_factor = max(0.5, self.energy_factor - 0.05)
+                elif event.key == config.KEY_ENERGY_DOWN:
+                    self.energy_factor = max(config.MIN_ENERGY_FACTOR, 
+                                           self.energy_factor - config.ENERGY_FACTOR_STEP)
                 
-                elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
-                    if len(self.points) < 20:
+                elif event.key in (config.KEY_ADD_POINT_1, config.KEY_ADD_POINT_2):
+                    if len(self.points) < config.MAX_POINTS:
                         self.num_points += 1
                         self.generate_points()
                 
-                elif event.key == pygame.K_MINUS:
-                    if len(self.points) > 1:
+                elif event.key == config.KEY_REMOVE_POINT:
+                    if len(self.points) > config.MIN_POINTS:
                         self.num_points -= 1
                         self.generate_points()
                 
-                elif event.key == pygame.K_r:
+                elif event.key == config.KEY_RESET:
                     self.generate_points()
+                
+                elif event.key == config.KEY_TOGGLE_UI:
+                    self.show_ui = not self.show_ui
     
     def run(self):
         """Main simulation loop."""
         while self.running:
-            dt = self.clock.tick(60) / 1000.0  # Delta time in seconds
+            dt = self.clock.tick(config.FPS) / 1000.0  # Delta time in seconds
             
             self.handle_events()
             self.update_physics(dt)
@@ -440,10 +453,10 @@ class CircleSimulation:
 def main():
     """Main function to start the simulation."""
     simulation = CircleSimulation(
-        width=800,
-        height=600,
-        num_points=5,
-        energy_factor=1.0
+        width=config.WINDOW_WIDTH,
+        height=config.WINDOW_HEIGHT,
+        num_points=config.DEFAULT_NUM_POINTS,
+        energy_factor=config.DEFAULT_ENERGY_FACTOR
     )
     simulation.run()
 
