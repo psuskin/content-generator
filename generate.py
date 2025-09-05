@@ -241,7 +241,7 @@ class VideoGenerator:
         
         if not is_viable:
             print(f"✗ Simulation test failed, skipping video recording")
-            # return None
+            return None
         
         print(f"✓ Simulation test passed, proceeding to record video...")
         
