@@ -576,7 +576,7 @@ class CircleSimulation:
             point.line_ids.append(line_id)
     
     def check_point_collision(self, point1, point2):
-        """Check and handle collision between two points."""
+        """Check and handle elastic collision between two points with energy factor."""
         dx = point2.x - point1.x
         dy = point2.y - point1.y
         distance = math.sqrt(dx ** 2 + dy ** 2)
@@ -613,35 +613,48 @@ class CircleSimulation:
             if dvn > 0:
                 return
             
-            # Collision impulse (assuming equal masses)
-            impulse = 2 * dvn / (point1.mass + point2.mass)
+            # ELASTIC COLLISION PHYSICS WITH ENERGY FACTOR
+            # For elastic collision between equal masses, velocities exchange along normal
             
-            # Limit impulse to prevent extreme velocity changes
-            max_impulse = config.MAX_IMPULSE
-            impulse = max(-max_impulse, min(max_impulse, impulse))
+            # Store original speeds for energy factor calculation
+            speed1_before = point1.get_speed()
+            speed2_before = point2.get_speed()
             
-            # Update velocities
-            point1.vx += impulse * point2.mass * nx
-            point1.vy += impulse * point2.mass * ny
-            point2.vx -= impulse * point1.mass * nx
-            point2.vy -= impulse * point1.mass * ny
+            # Velocity components along collision normal
+            v1n = point1.vx * nx + point1.vy * ny
+            v2n = point2.vx * nx + point2.vy * ny
             
-            # Apply energy factor with safety limits
-            current_speed1 = point1.get_speed()
-            current_speed2 = point2.get_speed()
+            # Velocity components perpendicular to collision normal
+            tx = -ny  # Tangent vector perpendicular to normal
+            ty = nx
+            v1t = point1.vx * tx + point1.vy * ty
+            v2t = point2.vx * tx + point2.vy * ty
             
-            new_speed1 = current_speed1 * self.energy_factor
-            new_speed2 = current_speed2 * self.energy_factor
+            # For elastic collision with equal masses, normal components are exchanged
+            # Tangential components remain unchanged
+            v1n_new = v2n
+            v2n_new = v1n
             
-            # Limit maximum speed increase per collision
-            max_speed_increase1 = current_speed1 * config.MAX_SPEED_INCREASE_PER_COLLISION
-            max_speed_increase2 = current_speed2 * config.MAX_SPEED_INCREASE_PER_COLLISION
+            # Reconstruct velocity vectors
+            point1.vx = v1n_new * nx + v1t * tx
+            point1.vy = v1n_new * ny + v1t * ty
+            point2.vx = v2n_new * nx + v2t * tx
+            point2.vy = v2n_new * ny + v2t * ty
             
-            new_speed1 = min(new_speed1, max_speed_increase1)
-            new_speed2 = min(new_speed2, max_speed_increase2)
+            # Apply energy factor boost to both points
+            # This adds energy to the system, making it more chaotic over time
+            speed1_after_elastic = point1.get_speed()
+            speed2_after_elastic = point2.get_speed()
             
-            point1.set_speed(new_speed1)
-            point2.set_speed(new_speed2)
+            # Apply energy factor with validation
+            if speed1_after_elastic > config.MIN_SPEED_EPSILON:
+                point1.set_speed(speed1_after_elastic * self.energy_factor)
+            if speed2_after_elastic > config.MIN_SPEED_EPSILON:
+                point2.set_speed(speed2_after_elastic * self.energy_factor)
+            
+            # Validate final velocities
+            point1.validate_values()
+            point2.validate_values()
             
             # Separate overlapping points
             overlap = (point1.radius + point2.radius) - distance
