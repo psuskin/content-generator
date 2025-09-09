@@ -519,20 +519,15 @@ class CircleSimulation:
                 nx = math.cos(angle)
                 ny = math.sin(angle)
             
-            # Reflect velocity
+            # Reflect velocity (elastic collision with boundary)
             dot_product = point.vx * nx + point.vy * ny
             point.vx -= 2 * dot_product * nx
             point.vy -= 2 * dot_product * ny
             
-            # Apply energy factor with safety limits
+            # Apply energy factor boost (same as point-point collisions)
             current_speed = point.get_speed()
-            new_speed = current_speed * self.energy_factor
-            
-            # Limit maximum speed increase per collision
-            max_speed_increase = current_speed * config.MAX_SPEED_INCREASE_PER_COLLISION
-            new_speed = min(new_speed, max_speed_increase)
-            
-            point.set_speed(new_speed)
+            if current_speed > config.MIN_SPEED_EPSILON:
+                point.set_speed(current_speed * self.energy_factor)
             
             # Move point back inside circle
             if distance_from_center > 0:

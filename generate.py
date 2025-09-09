@@ -461,7 +461,7 @@ class VideoGenerator:
 def main():
     """Main function to run video generation."""
     # Configuration parameters
-    ENERGY_FACTOR = 1.1  # Match the manual simulation that achieved 60+ seconds
+    ENERGY_FACTOR = 1.05  # Match the manual simulation that achieved 60+ seconds
     NUM_POINTS = 5
     NUM_VIDEOS = 10  # Number of successful videos to generate
     VIDEO_WIDTH = 1920   # Full HD width for crisp quality
