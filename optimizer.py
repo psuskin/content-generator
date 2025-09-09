@@ -10,6 +10,9 @@ from datetime import datetime
 from main import CircleSimulation, Point
 import config
 
+# Import color generation functions from main
+from main import generate_distinct_colors
+
 class StartingCondition:
     """
     Represents a set of starting conditions for the simulation.
@@ -33,6 +36,10 @@ class StartingCondition:
     def generate_random(self):
         """Generate random starting conditions."""
         self.points = []
+        
+        # Generate distinct colors for all points at once
+        distinct_colors = generate_distinct_colors(self.num_points)
+        
         min_distance = config.MIN_DISTANCE_BETWEEN_POINTS
         max_attempts = config.MAX_PLACEMENT_ATTEMPTS
         
@@ -65,12 +72,8 @@ class StartingCondition:
                     vx = speed * math.cos(direction)
                     vy = speed * math.sin(direction)
                     
-                    # Generate random color
-                    color = (
-                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX),
-                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX),
-                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX)
-                    )
+                    # Use pre-generated distinct color for this point
+                    color = distinct_colors[i]
                     
                     self.points.append((x, y, vx, vy, color))
                     placed = True

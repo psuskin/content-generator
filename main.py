@@ -4,6 +4,92 @@ import random
 import math
 import config
 
+# Vibrant, eye-catching color palette with high contrast
+VIBRANT_COLORS = [
+    (255, 50, 50),    # Bright Red
+    (50, 255, 50),    # Bright Green  
+    (50, 50, 255),    # Bright Blue
+    (255, 255, 50),   # Bright Yellow
+    (255, 50, 255),   # Bright Magenta
+    (50, 255, 255),   # Bright Cyan
+    (255, 150, 50),   # Bright Orange
+    (150, 50, 255),   # Bright Purple
+    (255, 50, 150),   # Bright Pink
+    (150, 255, 50),   # Bright Lime
+    (50, 150, 255),   # Bright Sky Blue
+    (255, 200, 50),   # Bright Gold
+    (255, 100, 100),  # Light Red
+    (100, 255, 100),  # Light Green
+    (100, 100, 255),  # Light Blue
+    (200, 255, 100),  # Light Yellow-Green
+    (255, 100, 200),  # Light Pink
+    (100, 255, 200),  # Light Turquoise
+    (200, 100, 255),  # Light Violet
+    (255, 200, 100),  # Light Peach
+]
+
+def color_distance(color1, color2):
+    """Calculate the perceptual distance between two RGB colors."""
+    # Use weighted Euclidean distance for better perceptual accuracy
+    r_diff = color1[0] - color2[0]
+    g_diff = color1[1] - color2[1]
+    b_diff = color1[2] - color2[2]
+    
+    # Weight green more heavily as human eyes are more sensitive to it
+    return math.sqrt(2 * r_diff**2 + 4 * g_diff**2 + 3 * b_diff**2)
+
+def generate_distinct_colors(num_colors):
+    """
+    Generate a list of distinct, vibrant colors.
+    Uses predefined palette first, then generates additional colors ensuring minimum distance.
+    """
+    if num_colors <= len(VIBRANT_COLORS):
+        # Use predefined palette, shuffled for variety
+        selected_colors = VIBRANT_COLORS[:num_colors].copy()
+        random.shuffle(selected_colors)
+        return selected_colors
+    
+    # Start with all predefined colors
+    colors = VIBRANT_COLORS.copy()
+    
+    # Generate additional colors if needed
+    min_distance = 100  # Minimum perceptual distance between colors
+    max_attempts = 1000  # Prevent infinite loops
+    
+    while len(colors) < num_colors:
+        attempts = 0
+        found_color = False
+        
+        while attempts < max_attempts and not found_color:
+            # Generate a bright, saturated color
+            # Ensure at least one channel is high (for vibrancy)
+            if random.random() < 0.33:
+                # Red-dominant
+                new_color = (random.randint(200, 255), random.randint(0, 150), random.randint(0, 150))
+            elif random.random() < 0.5:
+                # Green-dominant  
+                new_color = (random.randint(0, 150), random.randint(200, 255), random.randint(0, 150))
+            else:
+                # Blue-dominant
+                new_color = (random.randint(0, 150), random.randint(0, 150), random.randint(200, 255))
+            
+            # Check distance from all existing colors
+            min_dist = min(color_distance(new_color, existing) for existing in colors)
+            
+            if min_dist >= min_distance:
+                colors.append(new_color)
+                found_color = True
+            
+            attempts += 1
+        
+        if not found_color:
+            # If we can't find a distant color, reduce the minimum distance requirement
+            min_distance = max(50, min_distance - 10)
+    
+    # Shuffle for variety
+    random.shuffle(colors)
+    return colors[:num_colors]
+
 class Line:
     """
     Represents a line connecting a point to the wall.
@@ -256,6 +342,9 @@ class CircleSimulation:
         self.line_id_counter = 0
         Point._id_counter = 0  # Reset point ID counter
         
+        # Generate distinct colors for all points at once
+        distinct_colors = generate_distinct_colors(self.num_points)
+        
         min_distance = config.MIN_DISTANCE_BETWEEN_POINTS
         max_attempts = config.MAX_PLACEMENT_ATTEMPTS
         
@@ -285,12 +374,8 @@ class CircleSimulation:
                     vx = self.base_speed * math.cos(vel_angle)
                     vy = self.base_speed * math.sin(vel_angle)
                     
-                    # Create point with random color
-                    color = (
-                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX),
-                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX),
-                        random.randint(config.POINT_COLOR_MIN, config.POINT_COLOR_MAX)
-                    )
+                    # Use pre-generated distinct color for this point
+                    color = distinct_colors[i]
                     
                     point = Point(x, y, vx, vy, color=color)
                     self.points.append(point)
