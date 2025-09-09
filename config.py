@@ -45,6 +45,11 @@ LINE_ARC_DEGREES = 6  # Arc length in degrees between adjacent lines
 LINE_WIDTH = 2  # Thickness of the lines drawn to the wall
 LINE_ALPHA = 200  # Transparency of lines (0-255, 255 = opaque)
 
+# Two-stage line collision system:
+# - First hit by different color: line becomes dashed
+# - Second hit by different color: line is removed
+# This increases average video duration by giving lines a "second chance"
+
 # Line collision detection
 LINE_COLLISION_TOLERANCE = 5  # Distance tolerance for point-line intersection detection
 LINE_COLLISION_SUBDIVISIONS = 10  # Number of subdivisions for path-based collision detection

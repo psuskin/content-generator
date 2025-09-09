@@ -473,7 +473,7 @@ def main():
     VIDEO_WIDTH = 1920   # Full HD width for crisp quality
     VIDEO_HEIGHT = 1080  # Full HD height for crisp quality
     VIDEO_FPS = 60
-    MAX_ATTEMPTS_PER_VIDEO = 5  # Reduced since solution space should have high success rate
+    MAX_ATTEMPTS_PER_VIDEO = 100  # Reduced since solution space should have high success rate
     SIMULATION_SPEED_MULTIPLIER = 4.0  # How much faster to run simulation (4x = 17.5 min real time for 70s video)
     
     # Solution space file (set to None to use random generation)

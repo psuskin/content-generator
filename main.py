@@ -13,6 +13,8 @@ class Line:
         self.wall_angle = wall_angle  # Angle on wall where line connects (fixed)
         self.color = color  # Same color as the point
         self.active = True  # Whether the line is still active
+        self.dashed = False  # Whether the line is dashed (hit once)
+        self.last_collision_point_id = None  # Track which point last collided to prevent double hits
     
     def get_wall_position(self, center_x, center_y, radius):
         """Get the position on the wall where this line connects."""
@@ -333,6 +335,23 @@ class CircleSimulation:
         # Create a list of all active lines for more efficient checking
         active_lines = [(line_id, line) for line_id, line in self.lines.items() if line.active]
         
+        # Reset collision tracking for lines that are no longer being touched
+        for line_id, line in active_lines:
+            if line.last_collision_point_id is not None:
+                # Check if the last colliding point is still close to this line
+                colliding_point = None
+                for point in self.points:
+                    if point.id == line.last_collision_point_id:
+                        colliding_point = point
+                        break
+                
+                if colliding_point is None:
+                    # Point was removed, reset collision tracking
+                    line.last_collision_point_id = None
+                elif not line.check_point_intersection(colliding_point, self.center_x, self.center_y, self.circle_radius, self.points):
+                    # Point moved away from line, reset collision tracking
+                    line.last_collision_point_id = None
+        
         # Check each point against all lines
         for point in self.points:
             # Skip if point has minimal movement (optimization)
@@ -347,9 +366,9 @@ class CircleSimulation:
                 if line_id in lines_to_remove:
                     continue
                 
-                # Enhanced collision detection
+                # Enhanced collision detection with new two-stage system
                 if self._enhanced_line_collision_check(point, line, line_id):
-                    # Line collision detected - mark line for removal
+                    # Line collision detected - mark line for removal (second hit)
                     line.active = False
                     lines_to_remove.append(line_id)
         
@@ -360,17 +379,37 @@ class CircleSimulation:
         """Perform enhanced collision checking with multiple strategies."""
         # Strategy 1: Standard intersection check
         if line.check_point_intersection(point, self.center_x, self.center_y, self.circle_radius, self.points):
-            return True
+            return self._handle_line_collision(point, line, line_id)
         
         # Strategy 2: Check if point is about to cross line (predictive)
         if self._predictive_collision_check(point, line):
-            return True
+            return self._handle_line_collision(point, line, line_id)
         
         # Strategy 3: Check for high-speed tunneling
         if self._tunneling_check(point, line):
-            return True
+            return self._handle_line_collision(point, line, line_id)
         
         return False
+    
+    def _handle_line_collision(self, point, line, line_id):
+        """Handle a line collision with the new two-stage system."""
+        # Check if the colliding point has a different color than the line
+        if point.color != line.color:
+            # Prevent the same point from triggering multiple collisions immediately
+            if line.last_collision_point_id == point.id:
+                return False  # Same point still colliding, ignore
+            
+            line.last_collision_point_id = point.id  # Record this collision
+            
+            if not line.dashed:
+                # First collision: make line dashed
+                line.dashed = True
+                return False  # Don't remove the line yet
+            else:
+                # Second collision: remove the line
+                return True  # Remove the line
+        
+        return False  # No collision or same color
     
     def _predictive_collision_check(self, point, line):
         """Check if point will cross line in the next frame."""
@@ -728,17 +767,59 @@ class CircleSimulation:
                        math.isfinite(point_x) and math.isfinite(point_y)):
                     continue
                 
-                # Draw line from point to wall
-                pygame.draw.line(
-                    self.screen,
-                    line.color,
-                    (int(point_x), int(point_y)),
-                    (int(wall_x), int(wall_y)),
-                    config.LINE_WIDTH
-                )
+                # Draw line from point to wall (solid or dashed)
+                if line.dashed:
+                    # Draw dashed line
+                    self._draw_dashed_line(line.color, (int(point_x), int(point_y)), (int(wall_x), int(wall_y)), config.LINE_WIDTH)
+                else:
+                    # Draw solid line
+                    pygame.draw.line(
+                        self.screen,
+                        line.color,
+                        (int(point_x), int(point_y)),
+                        (int(wall_x), int(wall_y)),
+                        config.LINE_WIDTH
+                    )
             except (TypeError, ValueError, OverflowError):
                 # If there's any error drawing, skip this line
                 continue
+    
+    def _draw_dashed_line(self, color, start_pos, end_pos, width):
+        """Draw a dashed line between two points."""
+        dash_length = 10
+        gap_length = 5
+        
+        # Calculate line vector
+        dx = end_pos[0] - start_pos[0]
+        dy = end_pos[1] - start_pos[1]
+        line_length = math.sqrt(dx * dx + dy * dy)
+        
+        if line_length == 0:
+            return
+        
+        # Normalize direction vector
+        dx_norm = dx / line_length
+        dy_norm = dy / line_length
+        
+        # Draw dashes
+        current_distance = 0
+        while current_distance < line_length:
+            # Start of dash
+            dash_start_x = start_pos[0] + current_distance * dx_norm
+            dash_start_y = start_pos[1] + current_distance * dy_norm
+            
+            # End of dash
+            dash_end_distance = min(current_distance + dash_length, line_length)
+            dash_end_x = start_pos[0] + dash_end_distance * dx_norm
+            dash_end_y = start_pos[1] + dash_end_distance * dy_norm
+            
+            # Draw the dash
+            pygame.draw.line(self.screen, color, 
+                           (int(dash_start_x), int(dash_start_y)), 
+                           (int(dash_end_x), int(dash_end_y)), width)
+            
+            # Move to next dash (including gap)
+            current_distance += dash_length + gap_length
     
     def render_ui(self):
         """Render UI elements (statistics and controls)."""
@@ -753,9 +834,11 @@ class CircleSimulation:
         self.screen.blit(points_text, (config.UI_MARGIN, y_offset))
         y_offset += config.UI_STATS_SPACING
         
-        # Show active lines count
+        # Show active lines count (solid and dashed)
         active_lines = sum(1 for line in self.lines.values() if line.active)
-        lines_text = self.font.render(f"Lines: {active_lines}", True, config.UI_TEXT_COLOR)
+        dashed_lines = sum(1 for line in self.lines.values() if line.active and line.dashed)
+        solid_lines = active_lines - dashed_lines
+        lines_text = self.font.render(f"Lines: {solid_lines} solid, {dashed_lines} dashed", True, config.UI_TEXT_COLOR)
         self.screen.blit(lines_text, (config.UI_MARGIN, y_offset))
         y_offset += config.UI_STATS_SPACING
         
