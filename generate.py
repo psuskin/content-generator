@@ -243,27 +243,26 @@ class VideoGenerator:
     
     def run_simulation_for_video(self, simulation, video_writer):
         """
-        Run a simulation and record it to video in REAL TIME.
-        This records the full 70-second video without any acceleration or speed boosts.
+        Run a simulation and record it to video at ACCELERATED speed.
+        This records the full 70-second video much faster than real-time by running
+        physics at accelerated speed but capturing frames at the correct intervals.
         Returns True when completed successfully.
         """
         start_time = time.time()
         frame_count = 0
         
-        # Calculate time step for normal speed recording
+        # Calculate time step - use accelerated physics but capture at regular intervals
         base_dt = 1.0 / self.fps
+        accelerated_dt = base_dt * self.simulation_speed_multiplier
         
         # Calculate total frames needed
         target_frames = int(self.target_duration * self.fps)  # 60 seconds
         final_frames = int(self.final_duration * self.fps)   # 70 seconds
         
-        print(f"Recording {self.final_duration}s video in real time...")
-        print(f"Expected recording time: {self.final_duration:.0f}s real time")
+        print(f"Recording {self.final_duration}s video at {self.simulation_speed_multiplier}x speed...")
+        print(f"Expected recording time: ~{self.final_duration / self.simulation_speed_multiplier:.1f}s real time")
         
         while frame_count < final_frames:
-            current_real_time = time.time()
-            elapsed_real_time = current_real_time - start_time
-            
             # Calculate current video time
             video_time = frame_count / self.fps
             
@@ -275,8 +274,12 @@ class VideoGenerator:
                 for point in simulation.points:
                     point.max_speed = float('inf')
             
-            # Run physics at normal speed (no acceleration)
-            simulation.update_physics(base_dt)
+            # Run physics at accelerated speed for faster recording
+            simulation.update_physics(accelerated_dt)
+            
+            # Debug: Print energy factor every 30 seconds to verify it's working
+            if frame_count % (self.fps * 30) == 0 and frame_count > 0:
+                print(f"  Debug: video_time={video_time:.0f}s, energy_factor={simulation.energy_factor:.3f}, avg_speed={sum(point.get_speed() for point in simulation.points)/len(simulation.points):.1f}")
             
             # Render to our surface
             simulation.render()
