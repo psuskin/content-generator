@@ -92,7 +92,7 @@ def generate_distinct_colors(num_colors):
 
 class Line:
     """
-    Represents a line connecting a point to the wall.
+    Represents a line connecting a point to the wall with ROBUST collision detection.
     """
     def __init__(self, point_id, wall_angle, color):
         self.point_id = point_id  # ID of the point this line belongs to
@@ -100,7 +100,9 @@ class Line:
         self.color = color  # Same color as the point
         self.active = True  # Whether the line is still active
         self.dashed = False  # Whether the line is dashed (hit once)
-        self.last_collision_point_id = None  # Track which point last collided to prevent double hits
+        
+        # Simple collision tracking - just track which points have been near this line
+        self.collision_cooldown = {}  # point_id -> frames_remaining
     
     def get_wall_position(self, center_x, center_y, radius):
         """Get the position on the wall where this line connects."""
@@ -115,97 +117,67 @@ class Line:
                 return point.x, point.y
         return None, None
     
-    def check_point_intersection(self, point, center_x, center_y, radius, points):
-        """Check if a point crosses this line using path-based collision detection."""
-        if not self.active:
+    def check_point_line_intersection(self, test_point, center_x, center_y, radius, points):
+        """
+        Simple, robust line intersection check.
+        Returns True if point crosses the line (should trigger state change).
+        """
+        # Skip own lines (point can't cross its own lines)
+        if test_point.id == self.point_id:
+            return False
+            
+        # Only different colors should interact - skip same-color collisions
+        if test_point.color == self.color:
             return False
         
-        # Get current positions
+        # Check cooldown - prevent rapid repeated collisions
+        if test_point.id in self.collision_cooldown:
+            self.collision_cooldown[test_point.id] -= 1
+            if self.collision_cooldown[test_point.id] > 0:
+                return False
+            else:
+                del self.collision_cooldown[test_point.id]
+        
+        # Get line endpoints
         wall_x, wall_y = self.get_wall_position(center_x, center_y, radius)
         point_x, point_y = self.get_point_position(points)
         
         if point_x is None or point_y is None:
             return False
         
-        # Get movement path of the crossing point
-        prev_cross_x, prev_cross_y, curr_cross_x, curr_cross_y = point.get_movement_path()
-        
-        # Check both current position and movement path
-        return (self._check_position_intersection(curr_cross_x, curr_cross_y, point_x, point_y, wall_x, wall_y) or
-                self._check_path_intersection(prev_cross_x, prev_cross_y, curr_cross_x, curr_cross_y, 
-                                            point_x, point_y, wall_x, wall_y))
-    
-    def _check_position_intersection(self, cross_x, cross_y, point_x, point_y, wall_x, wall_y):
-        """Check if a position intersects with the line."""
-        # Calculate distance from crossing point to line (from point to wall)
-        line_length = math.sqrt((wall_x - point_x)**2 + (wall_y - point_y)**2)
-        if line_length < config.MIN_LINE_SEGMENT_LENGTH:
-            return False
-        
+        # Simple distance-to-line calculation
         # Vector from point to wall
         line_dx = wall_x - point_x
         line_dy = wall_y - point_y
+        line_length_sq = line_dx * line_dx + line_dy * line_dy
         
-        # Vector from point to crossing position
-        cross_dx = cross_x - point_x
-        cross_dy = cross_y - point_y
-        
-        # Project crossing position onto line
-        dot_product = (cross_dx * line_dx + cross_dy * line_dy) / (line_length * line_length)
-        
-        # Check if projection is within line bounds
-        if dot_product < 0 or dot_product > 1:
+        if line_length_sq < 1:  # Line too short
             return False
         
-        # Closest point on line to the crossing position
-        closest_x = point_x + dot_product * line_dx
-        closest_y = point_y + dot_product * line_dy
+        # Vector from point to test point
+        test_dx = test_point.x - point_x
+        test_dy = test_point.y - point_y
         
-        # Distance from crossing position to line
-        distance = math.sqrt((cross_x - closest_x)**2 + (cross_y - closest_y)**2)
+        # Project test point onto line
+        t = (test_dx * line_dx + test_dy * line_dy) / line_length_sq
+        t = max(0, min(1, t))  # Clamp to line segment
         
-        return distance <= config.LINE_COLLISION_TOLERANCE
-    
-    def _check_path_intersection(self, prev_x, prev_y, curr_x, curr_y, point_x, point_y, wall_x, wall_y):
-        """Check if the movement path intersects with the line using line-line intersection."""
-        # Use subdivisions to check multiple points along the path for high-speed movements
-        subdivisions = config.LINE_COLLISION_SUBDIVISIONS
+        # Closest point on line
+        closest_x = point_x + t * line_dx
+        closest_y = point_y + t * line_dy
         
-        for i in range(subdivisions + 1):
-            t = i / subdivisions
-            # Interpolate position along movement path
-            interp_x = prev_x + t * (curr_x - prev_x)
-            interp_y = prev_y + t * (curr_y - prev_y)
-            
-            if self._check_position_intersection(interp_x, interp_y, point_x, point_y, wall_x, wall_y):
-                return True
+        # Distance from test point to line
+        dist_x = test_point.x - closest_x
+        dist_y = test_point.y - closest_y
+        distance = math.sqrt(dist_x * dist_x + dist_y * dist_y)
         
-        # Additionally, check for direct line-line intersection
-        return self._check_line_line_intersection(prev_x, prev_y, curr_x, curr_y, point_x, point_y, wall_x, wall_y)
-    
-    def _check_line_line_intersection(self, x1, y1, x2, y2, x3, y3, x4, y4):
-        """Check if two line segments intersect using parametric equations."""
-        # Line 1: movement path (x1,y1) to (x2,y2)
-        # Line 2: connection line (x3,y3) to (x4,y4)
+        # Check if close enough to line to count as intersection
+        collision_threshold = config.LINE_COLLISION_TOLERANCE + test_point.radius
         
-        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-        if abs(denom) < 1e-10:  # Lines are parallel
-            return False
-        
-        # Calculate intersection parameters
-        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-        u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
-        
-        # Check if intersection occurs within both line segments
-        if 0 <= t <= 1 and 0 <= u <= 1:
-            # Calculate intersection point
-            intersection_x = x1 + t * (x2 - x1)
-            intersection_y = y1 + t * (y2 - y1)
-            
-            # Verify intersection is within tolerance (accounting for point radius)
-            movement_length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-            if movement_length > 0:
-                return True
+        if distance < collision_threshold:
+            # Set cooldown to prevent rapid repeated hits
+            self.collision_cooldown[test_point.id] = 30  # 30 frames = 0.5 seconds at 60fps
+            return True
         
         return False
 
@@ -414,133 +386,28 @@ class CircleSimulation:
             point.line_ids.append(line_id)
     
     def check_line_collisions(self):
-        """Check if any points cross lines of different colors using robust collision detection."""
+        """Check if any points cross lines of different colors using SIMPLE, ROBUST collision detection."""
         lines_to_remove = []
-        
-        # Create a list of all active lines for more efficient checking
-        active_lines = [(line_id, line) for line_id, line in self.lines.items() if line.active]
-        
-        # Reset collision tracking for lines that are no longer being touched
-        for line_id, line in active_lines:
-            if line.last_collision_point_id is not None:
-                # Check if the last colliding point is still close to this line
-                colliding_point = None
-                for point in self.points:
-                    if point.id == line.last_collision_point_id:
-                        colliding_point = point
-                        break
-                
-                if colliding_point is None:
-                    # Point was removed, reset collision tracking
-                    line.last_collision_point_id = None
-                elif not line.check_point_intersection(colliding_point, self.center_x, self.center_y, self.circle_radius, self.points):
-                    # Point moved away from line, reset collision tracking
-                    line.last_collision_point_id = None
         
         # Check each point against all lines
         for point in self.points:
-            # Skip if point has minimal movement (optimization)
-            movement_distance = math.sqrt((point.x - point.prev_x)**2 + (point.y - point.prev_y)**2)
-            
-            for line_id, line in active_lines:
-                # Don't check collision with own lines
-                if point.id == line.point_id:
+            for line_id, line in self.lines.items():
+                if not line.active:
                     continue
                 
-                # Skip if line is already marked for removal
-                if line_id in lines_to_remove:
-                    continue
-                
-                # Enhanced collision detection with new two-stage system
-                if self._enhanced_line_collision_check(point, line, line_id):
-                    # Line collision detected - mark line for removal (second hit)
-                    line.active = False
-                    lines_to_remove.append(line_id)
+                # Use simple, robust intersection check
+                if line.check_point_line_intersection(point, self.center_x, self.center_y, self.circle_radius, self.points):
+                    # A crossing was detected!
+                    if not line.dashed:
+                        # First crossing: make line dashed
+                        line.dashed = True
+                    else:
+                        # Second crossing: remove line
+                        line.active = False
+                        lines_to_remove.append(line_id)
         
         # Remove inactive lines
         self._remove_lines(lines_to_remove)
-    
-    def _enhanced_line_collision_check(self, point, line, line_id):
-        """Perform enhanced collision checking with multiple strategies."""
-        # Strategy 1: Standard intersection check
-        if line.check_point_intersection(point, self.center_x, self.center_y, self.circle_radius, self.points):
-            return self._handle_line_collision(point, line, line_id)
-        
-        # Strategy 2: Check if point is about to cross line (predictive)
-        if self._predictive_collision_check(point, line):
-            return self._handle_line_collision(point, line, line_id)
-        
-        # Strategy 3: Check for high-speed tunneling
-        if self._tunneling_check(point, line):
-            return self._handle_line_collision(point, line, line_id)
-        
-        return False
-    
-    def _handle_line_collision(self, point, line, line_id):
-        """Handle a line collision with the new two-stage system."""
-        # Check if the colliding point has a different color than the line
-        if point.color != line.color:
-            # Prevent the same point from triggering multiple collisions immediately
-            if line.last_collision_point_id == point.id:
-                return False  # Same point still colliding, ignore
-            
-            line.last_collision_point_id = point.id  # Record this collision
-            
-            if not line.dashed:
-                # First collision: make line dashed
-                line.dashed = True
-                return False  # Don't remove the line yet
-            else:
-                # Second collision: remove the line
-                return True  # Remove the line
-        
-        return False  # No collision or same color
-    
-    def _predictive_collision_check(self, point, line):
-        """Check if point will cross line in the next frame."""
-        # Get line endpoints
-        wall_x, wall_y = line.get_wall_position(self.center_x, self.center_y, self.circle_radius)
-        point_x, point_y = line.get_point_position(self.points)
-        
-        if point_x is None or point_y is None:
-            return False
-        
-        # Predict next position
-        next_dt = 1.0 / config.FPS  # Assume consistent frame rate
-        next_x = point.x + point.vx * next_dt
-        next_y = point.y + point.vy * next_dt
-        
-        # Check if predicted path would cross the line
-        return line._check_line_line_intersection(point.x, point.y, next_x, next_y, point_x, point_y, wall_x, wall_y)
-    
-    def _tunneling_check(self, point, line):
-        """Check for high-speed tunneling through lines."""
-        # Get movement distance
-        movement_distance = math.sqrt((point.x - point.prev_x)**2 + (point.y - point.prev_y)**2)
-        
-        # If movement is very large relative to collision tolerance, use finer subdivision
-        if movement_distance > config.LINE_COLLISION_TOLERANCE * 2:
-            # Get line endpoints
-            wall_x, wall_y = line.get_wall_position(self.center_x, self.center_y, self.circle_radius)
-            point_x, point_y = line.get_point_position(self.points)
-            
-            if point_x is None or point_y is None:
-                return False
-            
-            # Use higher subdivision count for very fast movements
-            subdivisions = max(config.LINE_COLLISION_SUBDIVISIONS, int(movement_distance / config.LINE_COLLISION_TOLERANCE))
-            subdivisions = min(subdivisions, 50)  # Cap to prevent performance issues
-            
-            for i in range(subdivisions + 1):
-                t = i / subdivisions
-                # Interpolate position along movement path
-                interp_x = point.prev_x + t * (point.x - point.prev_x)
-                interp_y = point.prev_y + t * (point.y - point.prev_y)
-                
-                if line._check_position_intersection(interp_x, interp_y, point_x, point_y, wall_x, wall_y):
-                    return True
-        
-        return False
     
     def _remove_lines(self, lines_to_remove):
         """Efficiently remove multiple lines."""
@@ -567,18 +434,11 @@ class CircleSimulation:
         
         # Remove points and their remaining line references
         for point in points_to_remove:
-            # Remove all lines belonging to this point
-            lines_to_remove = []
-            for line_id, line in self.lines.items():
-                if line.point_id == point.id:
-                    lines_to_remove.append(line_id)
-            
-            for line_id in lines_to_remove:
-                del self.lines[line_id]
-            
-            # Remove point from points list
+            # Remove any remaining line references
+            for line_id in point.line_ids:
+                if line_id in self.lines:
+                    del self.lines[line_id]
             self.points.remove(point)
-            self.num_points = len(self.points)
     
     def check_circle_collision(self, point):
         """Check and handle collision with circle boundary."""
@@ -588,48 +448,36 @@ class CircleSimulation:
         
         # Validate distance calculation
         if not math.isfinite(distance_from_center):
-            # Reset point to center if position is invalid
-            point.x = self.center_x
-            point.y = self.center_y
             distance_from_center = 0
         
         if distance_from_center + point.radius >= self.circle_radius:
-            # Calculate collision normal (pointing inward)
-            if distance_from_center > 0:
-                nx = (self.center_x - point.x) / distance_from_center
-                ny = (self.center_y - point.y) / distance_from_center
-            else:
-                # If point is at center, use random direction
-                angle = random.uniform(0, 2 * math.pi)
-                nx = math.cos(angle)
-                ny = math.sin(angle)
+            # Collision with circle boundary - reflect velocity and generate new lines
             
-            # Reflect velocity (elastic collision with boundary)
-            dot_product = point.vx * nx + point.vy * ny
-            point.vx -= 2 * dot_product * nx
-            point.vy -= 2 * dot_product * ny
-            
-            # Apply energy factor boost (same as point-point collisions)
-            current_speed = point.get_speed()
-            if current_speed > config.MIN_SPEED_EPSILON:
-                point.set_speed(current_speed * self.energy_factor)
+            # Calculate reflection
+            if distance_from_center > config.MIN_DISTANCE_EPSILON:
+                # Normal vector pointing inward
+                nx = -(point.x - self.center_x) / distance_from_center
+                ny = -(point.y - self.center_y) / distance_from_center
+                
+                # Reflect velocity
+                dot_product = point.vx * nx + point.vy * ny
+                point.vx = point.vx - 2 * dot_product * nx
+                point.vy = point.vy - 2 * dot_product * ny
+                
+                # Apply energy factor
+                point.vx *= self.energy_factor
+                point.vy *= self.energy_factor
             
             # Move point back inside circle
             if distance_from_center > 0:
-                overlap = (distance_from_center + point.radius) - self.circle_radius
-                point.x -= overlap * (point.x - self.center_x) / distance_from_center
-                point.y -= overlap * (point.y - self.center_y) / distance_from_center
-            else:
-                # If at center, move to safe position
-                safe_radius = self.circle_radius - point.radius - 10
-                angle = random.uniform(0, 2 * math.pi)
-                point.x = self.center_x + safe_radius * math.cos(angle)
-                point.y = self.center_y + safe_radius * math.sin(angle)
+                penetration = (distance_from_center + point.radius) - self.circle_radius
+                point.x -= penetration * (point.x - self.center_x) / distance_from_center
+                point.y -= penetration * (point.y - self.center_y) / distance_from_center
             
-            # Generate new lines at collision point
+            # Generate new lines for this collision
             self.generate_collision_lines(point)
             
-            # Final validation
+            # Validate point after collision
             point.validate_values()
     
     def generate_collision_lines(self, point):
@@ -693,61 +541,29 @@ class CircleSimulation:
             if dvn > 0:
                 return
             
-            # ELASTIC COLLISION PHYSICS WITH ENERGY FACTOR
-            # For elastic collision between equal masses, velocities exchange along normal
+            # Collision impulse (elastic collision)
+            impulse_magnitude = 2 * dvn / (point1.mass + point2.mass)
             
-            # Store original speeds for energy factor calculation
-            speed1_before = point1.get_speed()
-            speed2_before = point2.get_speed()
+            # Limit impulse to prevent extreme velocities
+            impulse_magnitude = max(-config.MAX_IMPULSE, min(config.MAX_IMPULSE, impulse_magnitude))
             
-            # Velocity components along collision normal
-            v1n = point1.vx * nx + point1.vy * ny
-            v2n = point2.vx * nx + point2.vy * ny
+            # Apply impulse with energy factor
+            impulse_x = impulse_magnitude * nx * self.energy_factor
+            impulse_y = impulse_magnitude * ny * self.energy_factor
             
-            # Velocity components perpendicular to collision normal
-            tx = -ny  # Tangent vector perpendicular to normal
-            ty = nx
-            v1t = point1.vx * tx + point1.vy * ty
-            v2t = point2.vx * tx + point2.vy * ty
-            
-            # For elastic collision with equal masses, normal components are exchanged
-            # Tangential components remain unchanged
-            v1n_new = v2n
-            v2n_new = v1n
-            
-            # Reconstruct velocity vectors
-            point1.vx = v1n_new * nx + v1t * tx
-            point1.vy = v1n_new * ny + v1t * ty
-            point2.vx = v2n_new * nx + v2t * tx
-            point2.vy = v2n_new * ny + v2t * ty
-            
-            # Apply energy factor boost to both points
-            # This adds energy to the system, making it more chaotic over time
-            speed1_after_elastic = point1.get_speed()
-            speed2_after_elastic = point2.get_speed()
-            
-            # Apply energy factor with validation
-            if speed1_after_elastic > config.MIN_SPEED_EPSILON:
-                point1.set_speed(speed1_after_elastic * self.energy_factor)
-            if speed2_after_elastic > config.MIN_SPEED_EPSILON:
-                point2.set_speed(speed2_after_elastic * self.energy_factor)
-            
-            # Validate final velocities
-            point1.validate_values()
-            point2.validate_values()
+            point1.vx += impulse_x * point2.mass
+            point1.vy += impulse_y * point2.mass
+            point2.vx -= impulse_x * point1.mass
+            point2.vy -= impulse_y * point1.mass
             
             # Separate overlapping points
             overlap = (point1.radius + point2.radius) - distance
-            separation = overlap / 2
+            separation_distance = min(config.MAX_SEPARATION, overlap * 0.5)
             
-            # Limit separation to prevent extreme position changes
-            max_separation = config.MAX_SEPARATION
-            separation = min(separation, max_separation)
-            
-            point1.x -= separation * nx
-            point1.y -= separation * ny
-            point2.x += separation * nx
-            point2.y += separation * ny
+            point1.x -= separation_distance * nx
+            point1.y -= separation_distance * ny
+            point2.x += separation_distance * nx
+            point2.y += separation_distance * ny
             
             # Validate both points after collision
             point1.validate_values()
@@ -788,15 +604,11 @@ class CircleSimulation:
             for j in range(i + 1, len(self.points)):
                 self.check_point_collision(self.points[i], self.points[j])
         
-        # Check line collisions again after all position changes
-        # This catches any new crossings created by collision responses
-        self.check_line_collisions()
-        
-        # Remove points that have no more lines
+        # Remove points that have no remaining lines
         self.remove_points_without_lines()
     
     def render(self):
-        """Render the simulation."""
+        """Render the entire simulation."""
         # Clear screen
         self.screen.fill(config.BACKGROUND_COLOR)
         
@@ -851,91 +663,98 @@ class CircleSimulation:
                 # Get wall position
                 wall_x, wall_y = line.get_wall_position(self.center_x, self.center_y, self.circle_radius)
                 
-                # Get current point position
+                # Get point position
                 point_x, point_y = line.get_point_position(self.points)
                 
-                # Ensure coordinates are valid
-                if not (math.isfinite(wall_x) and math.isfinite(wall_y) and 
-                       point_x is not None and point_y is not None and
-                       math.isfinite(point_x) and math.isfinite(point_y)):
+                if point_x is None or point_y is None:
                     continue
                 
-                # Draw line from point to wall (solid or dashed)
+                # Ensure coordinates are finite
+                if not all(math.isfinite(coord) for coord in [wall_x, wall_y, point_x, point_y]):
+                    continue
+                
+                # Convert to integers for drawing
+                start_pos = (int(point_x), int(point_y))
+                end_pos = (int(wall_x), int(wall_y))
+                
+                # Choose line style based on state
                 if line.dashed:
                     # Draw dashed line
-                    self._draw_dashed_line(line.color, (int(point_x), int(point_y)), (int(wall_x), int(wall_y)), config.LINE_WIDTH)
+                    self._draw_dashed_line(line.color, start_pos, end_pos, config.LINE_WIDTH)
                 else:
                     # Draw solid line
-                    pygame.draw.line(
-                        self.screen,
-                        line.color,
-                        (int(point_x), int(point_y)),
-                        (int(wall_x), int(wall_y)),
-                        config.LINE_WIDTH
-                    )
+                    pygame.draw.line(self.screen, line.color, start_pos, end_pos, config.LINE_WIDTH)
+            
             except (TypeError, ValueError, OverflowError):
                 # If there's any error drawing, skip this line
                 continue
     
     def _draw_dashed_line(self, color, start_pos, end_pos, width):
         """Draw a dashed line between two points."""
-        dash_length = 10
-        gap_length = 5
+        x1, y1 = start_pos
+        x2, y2 = end_pos
         
-        # Calculate line vector
-        dx = end_pos[0] - start_pos[0]
-        dy = end_pos[1] - start_pos[1]
-        line_length = math.sqrt(dx * dx + dy * dy)
+        # Calculate line length and direction
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx * dx + dy * dy)
         
-        if line_length == 0:
+        if length < 1:
             return
         
-        # Normalize direction vector
-        dx_norm = dx / line_length
-        dy_norm = dy / line_length
+        # Normalize direction
+        dx /= length
+        dy /= length
         
-        # Draw dashes
-        current_distance = 0
-        while current_distance < line_length:
+        # Draw dashed segments
+        dash_length = 10
+        gap_length = 5
+        segment_length = dash_length + gap_length
+        
+        current_pos = 0
+        while current_pos < length:
             # Start of dash
-            dash_start_x = start_pos[0] + current_distance * dx_norm
-            dash_start_y = start_pos[1] + current_distance * dy_norm
+            start_x = x1 + current_pos * dx
+            start_y = y1 + current_pos * dy
             
             # End of dash
-            dash_end_distance = min(current_distance + dash_length, line_length)
-            dash_end_x = start_pos[0] + dash_end_distance * dx_norm
-            dash_end_y = start_pos[1] + dash_end_distance * dy_norm
+            end_pos_current = min(current_pos + dash_length, length)
+            end_x = x1 + end_pos_current * dx
+            end_y = y1 + end_pos_current * dy
             
-            # Draw the dash
-            pygame.draw.line(self.screen, color, 
-                           (int(dash_start_x), int(dash_start_y)), 
-                           (int(dash_end_x), int(dash_end_y)), width)
+            # Draw dash segment
+            pygame.draw.line(
+                self.screen, 
+                color, 
+                (int(start_x), int(start_y)), 
+                (int(end_x), int(end_y)), 
+                width
+            )
             
-            # Move to next dash (including gap)
-            current_distance += dash_length + gap_length
+            current_pos += segment_length
     
     def render_ui(self):
-        """Render UI elements (statistics and controls)."""
-        # Draw UI information
+        """Render the user interface overlay."""
         y_offset = config.UI_MARGIN
         
-        energy_text = self.font.render(f"Energy Factor: {self.energy_factor:.2f}", True, config.UI_TEXT_COLOR)
-        self.screen.blit(energy_text, (config.UI_MARGIN, y_offset))
-        y_offset += config.UI_STATS_SPACING
+        # Title
+        title_text = self.font.render("Point Collision Simulation", True, config.UI_TITLE_COLOR)
+        self.screen.blit(title_text, (config.UI_MARGIN, y_offset))
+        y_offset += config.UI_LINE_HEIGHT
         
-        points_text = self.font.render(f"Points: {len(self.points)}", True, config.UI_TEXT_COLOR)
-        self.screen.blit(points_text, (config.UI_MARGIN, y_offset))
-        y_offset += config.UI_STATS_SPACING
+        # Simulation stats
+        stats = [
+            f"Points: {len(self.points)}",
+            f"Lines: {len([l for l in self.lines.values() if l.active])}",
+            f"Energy Factor: {self.energy_factor:.3f}"
+        ]
         
-        # Show active lines count (solid and dashed)
-        active_lines = sum(1 for line in self.lines.values() if line.active)
-        dashed_lines = sum(1 for line in self.lines.values() if line.active and line.dashed)
-        solid_lines = active_lines - dashed_lines
-        lines_text = self.font.render(f"Lines: {solid_lines} solid, {dashed_lines} dashed", True, config.UI_TEXT_COLOR)
-        self.screen.blit(lines_text, (config.UI_MARGIN, y_offset))
-        y_offset += config.UI_STATS_SPACING
+        for stat in stats:
+            stat_text = self.font.render(stat, True, config.UI_TEXT_COLOR)
+            self.screen.blit(stat_text, (config.UI_MARGIN, y_offset))
+            y_offset += config.UI_STATS_SPACING
         
-        # Calculate average speed
+        # Show average speed
         if self.points:
             valid_speeds = []
             for point in self.points:
@@ -945,8 +764,8 @@ class CircleSimulation:
             
             if valid_speeds:
                 avg_speed = sum(valid_speeds) / len(valid_speeds)
-                speed_text = self.font.render(f"Avg Speed: {avg_speed:.1f}", True, config.UI_TEXT_COLOR)
-                self.screen.blit(speed_text, (config.UI_MARGIN, y_offset))
+                avg_speed_text = self.font.render(f"Avg Speed: {avg_speed:.1f}", True, config.UI_TEXT_COLOR)
+                self.screen.blit(avg_speed_text, (config.UI_MARGIN, y_offset))
                 y_offset += config.UI_STATS_SPACING
                 
                 # Show max speed as well
