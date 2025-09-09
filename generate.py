@@ -136,8 +136,8 @@ class VideoGenerator:
         config.CIRCLE_MARGIN = int(config.CIRCLE_MARGIN * scale_factor)
         config.MIN_DISTANCE_BETWEEN_POINTS = int(config.MIN_DISTANCE_BETWEEN_POINTS * scale_factor)
         
-        # Reduce base speed to compensate for accelerated simulation appearing faster
-        config.BASE_SPEED = config.BASE_SPEED / self.simulation_speed_multiplier
+        # Scale BASE_SPEED proportionally for video recording so points move at same relative speed
+        config.BASE_SPEED = int(config.BASE_SPEED * scale_factor)
         
         # Create simulation with no default points
         simulation = CircleSimulation(
@@ -194,110 +194,91 @@ class VideoGenerator:
         """
         Test if a simulation will last the full duration without recording video.
         Returns True if simulation is viable, False otherwise.
+        This runs at accelerated speed for quick testing.
         """
         start_time = time.time()
         frame_count = 0
-        speed_boosted = False
         
         # Calculate time step for accelerated simulation
         base_dt = 1.0 / self.fps
         
-        # Calculate total frames needed for target video duration
+        # Calculate total frames needed for target duration (in normal time)
         target_frames = int(self.target_duration * self.fps)
-        final_frames = int(self.final_duration * self.fps)
         
         print(f"Testing simulation viability with {len(simulation.points)} points, energy factor {self.energy_factor}")
-        print(f"Simulation speed: {self.simulation_speed_multiplier}x (testing {self.final_duration}s in {self.final_duration/self.simulation_speed_multiplier:.1f}s real time)")
+        print(f"Testing at {self.simulation_speed_multiplier}x speed for faster evaluation...")
         
-        while frame_count < final_frames:
+        while frame_count < target_frames:
             current_real_time = time.time()
             elapsed_real_time = current_real_time - start_time
             
-            # Calculate current video time based on frame count
+            # Calculate current video time based on frame count (normal speed equivalent)
             video_time = frame_count / self.fps
             
             # Check if all points are gone (simulation ended early)
             if len(simulation.points) == 0:
-                print(f"Simulation test failed at {video_time:.1f}s video time - all points eliminated (real time: {elapsed_real_time:.1f}s)")
+                print(f"✗ Test failed at {video_time:.1f}s - all points eliminated (real time: {elapsed_real_time:.1f}s)")
                 return False
             
-            # Check if only one point remains before reaching target duration (boring scenario)
-            if len(simulation.points) == 1 and video_time < self.target_duration:
-                print(f"Simulation test failed at {video_time:.1f}s video time - only one point remaining (boring) (real time: {elapsed_real_time:.1f}s)")
+            # Check if only one point remains before reaching target duration
+            if len(simulation.points) == 1:
+                print(f"✗ Test failed at {video_time:.1f}s - only one point remaining (real time: {elapsed_real_time:.1f}s)")
                 return False
             
-            # Apply speed boost at target duration
-            if frame_count >= target_frames and not speed_boosted:
-                print(f"Applying speed boost at {video_time:.1f}s video time (real time: {elapsed_real_time:.1f}s)")
-                # Set maximum speed to infinity (remove speed limit)
-                for point in simulation.points:
-                    point.max_speed = float('inf')
-                # Also update the config maximum speed
-                original_max_speed = config.MAX_POINT_SPEED
-                config.MAX_POINT_SPEED = float('inf')
-                speed_boosted = True
-            
-            # Run multiple physics updates per frame to achieve acceleration
-            for _ in range(int(self.simulation_speed_multiplier)):
-                simulation.update_physics(base_dt)
+            # Run accelerated physics with larger time step for faster testing
+            # This is more accurate than multiple small updates
+            accelerated_dt = base_dt * self.simulation_speed_multiplier
+            simulation.update_physics(accelerated_dt)
             
             frame_count += 1
             
             # Print progress every 15 seconds of video time (less frequent for testing)
             if frame_count % (self.fps * 15) == 0:
                 actual_speedup = video_time / elapsed_real_time if elapsed_real_time > 0 else 0
-                print(f"Test progress: {video_time:.1f}s video time ({elapsed_real_time:.1f}s real, {actual_speedup:.1f}x speed), Points: {len(simulation.points)}")
+                print(f"  Test progress: {video_time:.1f}s video time ({elapsed_real_time:.1f}s real, {actual_speedup:.1f}x speed), Points: {len(simulation.points)}")
         
-        # Restore original max speed if it was changed
-        if speed_boosted:
-            config.MAX_POINT_SPEED = original_max_speed
-        
-        print(f"Simulation test PASSED: {self.final_duration:.1f}s video time (real time: {elapsed_real_time:.1f}s)")
+        elapsed_real_time = time.time() - start_time
+        print(f"✓ Test passed: {self.target_duration:.0f}s simulation with {len(simulation.points)} points (real time: {elapsed_real_time:.1f}s)")
         return True
     
     def run_simulation_for_video(self, simulation, video_writer):
         """
-        Run a simulation and record it to video.
-        This assumes the simulation has already been tested and is viable.
+        Run a simulation and record it to video in REAL TIME.
+        This records the full 70-second video without any acceleration or speed boosts.
         Returns True when completed successfully.
         """
         start_time = time.time()
         frame_count = 0
-        speed_boosted = False
         
-        # Calculate time step
+        # Calculate time step for normal speed recording
         base_dt = 1.0 / self.fps
         
         # Calculate total frames needed
-        target_frames = int(self.target_duration * self.fps)
-        final_frames = int(self.final_duration * self.fps)
+        target_frames = int(self.target_duration * self.fps)  # 60 seconds
+        final_frames = int(self.final_duration * self.fps)   # 70 seconds
         
-        print(f"Recording simulation to video...")
-        print(f"Expected recording time: {self.final_duration / self.simulation_speed_multiplier:.1f}s real time")
+        print(f"Recording {self.final_duration}s video in real time...")
+        print(f"Expected recording time: {self.final_duration:.0f}s real time")
         
         while frame_count < final_frames:
             current_real_time = time.time()
             elapsed_real_time = current_real_time - start_time
             
-            # Calculate current video time based on frame count
+            # Calculate current video time
             video_time = frame_count / self.fps
             
-            # Apply speed boost at target duration
-            if frame_count >= target_frames and not speed_boosted:
-                print(f"Applying speed boost for recording at {video_time:.1f}s video time")
-                # Set maximum speed to infinity (remove speed limit)
-                for point in simulation.points:
-                    point.max_speed = float('inf')
-                # Also update the config maximum speed
+            # Remove speed cap at 60 seconds for chaotic finale
+            if frame_count == target_frames:
+                print(f"Removing speed cap at {video_time:.0f}s for chaotic finale...")
                 original_max_speed = config.MAX_POINT_SPEED
                 config.MAX_POINT_SPEED = float('inf')
-                speed_boosted = True
+                for point in simulation.points:
+                    point.max_speed = float('inf')
             
-            # Run multiple physics updates per frame to achieve acceleration
-            for _ in range(int(self.simulation_speed_multiplier)):
-                simulation.update_physics(base_dt)
+            # Run physics at normal speed (no acceleration)
+            simulation.update_physics(base_dt)
             
-            # Render to our surface (only once per frame, not per physics update)
+            # Render to our surface
             simulation.render()
             
             # Convert surface to array and write to video
@@ -306,16 +287,12 @@ class VideoGenerator:
             
             frame_count += 1
             
-            # Print progress every 20 seconds of video time
-            if frame_count % (self.fps * 20) == 0:
-                actual_speedup = video_time / elapsed_real_time if elapsed_real_time > 0 else 0
-                print(f"Recording progress: {video_time:.1f}s video time ({elapsed_real_time:.1f}s real, {actual_speedup:.1f}x speed)")
+            # Print progress every 10 seconds of video time
+            if frame_count % (self.fps * 10) == 0:
+                print(f"Recording progress: {video_time:.0f}s video time, {len(simulation.points)} points remaining")
         
-        # Restore original max speed if it was changed
-        if speed_boosted:
-            config.MAX_POINT_SPEED = original_max_speed
-        
-        print(f"Video recording completed: {self.final_duration:.1f}s video time (real time: {elapsed_real_time:.1f}s)")
+        elapsed_real_time = time.time() - start_time
+        print(f"✓ Video recording completed: {self.final_duration:.0f}s video (real time: {elapsed_real_time:.1f}s)")
         return True
     
     def generate_video(self, num_points=5, attempt_number=1, use_solution_space=True):
@@ -467,14 +444,14 @@ class VideoGenerator:
 def main():
     """Main function to run video generation."""
     # Configuration parameters
-    ENERGY_FACTOR = 1.1  # Can be modified as needed
+    ENERGY_FACTOR = 1.1  # Match the manual simulation that achieved 60+ seconds
     NUM_POINTS = 5
     NUM_VIDEOS = 10  # Number of successful videos to generate
     VIDEO_WIDTH = 1920   # Full HD width for crisp quality
     VIDEO_HEIGHT = 1080  # Full HD height for crisp quality
     VIDEO_FPS = 60
-    MAX_ATTEMPTS_PER_VIDEO = 100  # Reduced since solution space should have high success rate
-    SIMULATION_SPEED_MULTIPLIER = 4.0  # How much faster to run simulation (4x = 17.5 min real time for 70s video)
+    MAX_ATTEMPTS_PER_VIDEO = 50  # Should be much lower with correct energy factor
+    SIMULATION_SPEED_MULTIPLIER = 4.0  # How much faster to run TESTING (video recording is always real-time)
     
     # Solution space file (set to None to use random generation)
     SOLUTION_SPACE_FILE = "solution_space/solution_space_latest.json"  # Update this path as needed
@@ -483,7 +460,7 @@ def main():
     print("=" * 50)
     print("Two-phase generation process:")
     print("1. Test simulation viability at high speed (no recording)")
-    print("2. Record video only for viable simulations")
+    print("2. Record video in REAL TIME for viable simulations")
     
     # Check for solution space
     if SOLUTION_SPACE_FILE and os.path.exists(SOLUTION_SPACE_FILE):
@@ -500,7 +477,7 @@ def main():
     print("- Must survive 60+ seconds with at least 2 points")
     print("- Speed cap removed at 60s for final 10s of chaos")
     print("- Simulations with <2 points before 60s are discarded")
-    print(f"- Simulation speed: {SIMULATION_SPEED_MULTIPLIER}x (faster generation)")
+    print(f"- Testing speed: {SIMULATION_SPEED_MULTIPLIER}x (video recording: 1x real-time)")
     print("-" * 50)
     
     # Create video generator

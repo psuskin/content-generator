@@ -437,7 +437,7 @@ def main():
     # Configuration
     TARGET_DURATION = 60  # seconds
     NUM_POINTS = 5
-    ENERGY_FACTOR = 1.1
+    ENERGY_FACTOR = 1.1  # Match the manual simulation that achieved 60+ seconds
     VIDEO_WIDTH = 1920
     VIDEO_HEIGHT = 1080
     SIMULATION_SPEED_MULTIPLIER = 4.0
