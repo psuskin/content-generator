@@ -295,6 +295,20 @@ class VideoGenerator:
         print(f"✓ Video recording completed: {self.final_duration:.0f}s video (real time: {elapsed_real_time:.1f}s)")
         return True
     
+    def extract_simulation_state(self, simulation):
+        """Extract the exact state of a simulation for replication."""
+        state = {
+            'points': [],
+            'energy_factor': simulation.energy_factor,
+            'width': simulation.width,
+            'height': simulation.height
+        }
+        
+        for point in simulation.points:
+            state['points'].append((point.x, point.y, point.vx, point.vy, point.color))
+        
+        return state
+
     def generate_video(self, num_points=5, attempt_number=1, use_solution_space=True):
         """
         Generate a single video file using two-phase approach:
@@ -308,11 +322,12 @@ class VideoGenerator:
         """
         print(f"\nAttempt {attempt_number}: ", end="")
         
-        # Choose generation method
+        # Choose generation method and get simulation state
         if use_solution_space and self.solution_space:
             print("Using optimized solution from solution space...")
             # Select random solution from solution space
             solution_data = random.choice(self.solution_space)
+            simulation_state = solution_data  # Already in the right format
             
             # Phase 1: Test with solution space data (should pass, but verify)
             test_simulation = self.create_simulation_from_solution(solution_data)
@@ -324,8 +339,10 @@ class VideoGenerator:
             
         else:
             print("Testing random simulation viability...")
-            # Phase 1: Test simulation without recording (original method)
+            # Phase 1: Test simulation without recording - extract its exact state
             test_simulation = self.create_simulation(num_points)
+            simulation_state = self.extract_simulation_state(test_simulation)
+            
             is_viable = self.test_simulation_viability(test_simulation)
             
             if not is_viable:
@@ -334,7 +351,7 @@ class VideoGenerator:
         
         print(f"✓ Simulation test passed, proceeding to record video...")
         
-        # Phase 2: Create new simulation and record video
+        # Phase 2: Create identical simulation for recording
         # Create timestamp for filename
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         method = "optimized" if (use_solution_space and self.solution_space) else "random"
@@ -352,11 +369,8 @@ class VideoGenerator:
             return None
         
         try:
-            # Create simulation for recording using same method as test
-            if use_solution_space and self.solution_space:
-                recording_simulation = self.create_simulation_from_solution(solution_data)
-            else:
-                recording_simulation = self.create_simulation(num_points)
+            # Create recording simulation using EXACT same state as test simulation
+            recording_simulation = self.create_simulation_from_solution(simulation_state)
             
             success = self.run_simulation_for_video(recording_simulation, video_writer)
             
@@ -450,7 +464,7 @@ def main():
     VIDEO_WIDTH = 1920   # Full HD width for crisp quality
     VIDEO_HEIGHT = 1080  # Full HD height for crisp quality
     VIDEO_FPS = 60
-    MAX_ATTEMPTS_PER_VIDEO = 50  # Should be much lower with correct energy factor
+    MAX_ATTEMPTS_PER_VIDEO = 1000  # Should be much lower with correct energy factor
     SIMULATION_SPEED_MULTIPLIER = 4.0  # How much faster to run TESTING (video recording is always real-time)
     
     # Solution space file (set to None to use random generation)
