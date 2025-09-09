@@ -15,7 +15,7 @@ BACKGROUND_COLOR = (0, 0, 0)  # Black
 # =============================================================================
 DEFAULT_NUM_POINTS = 5
 DEFAULT_ENERGY_FACTOR = 1.0
-BASE_SPEED = 100  # pixels per second
+BASE_SPEED = 200  # pixels per second
 MAX_POINTS = 20
 MIN_POINTS = 1
 
@@ -29,7 +29,7 @@ ENERGY_FACTOR_STEP = 0.05
 # =============================================================================
 POINT_RADIUS = 10
 POINT_MASS = 1.0
-MAX_POINT_SPEED = 2000  # Maximum allowed speed to prevent instability
+MAX_POINT_SPEED = 5000  # Maximum allowed speed to prevent instability
 MIN_DISTANCE_BETWEEN_POINTS = 50  # Minimum distance when generating points
 MAX_PLACEMENT_ATTEMPTS = 1000
 
