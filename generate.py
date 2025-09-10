@@ -24,7 +24,8 @@ class VideoGenerator:
         self.fps = fps
         self.simulation_speed_multiplier = simulation_speed_multiplier  # How much faster to run simulation
         self.target_duration = 60  # seconds to run before speed boost
-        self.final_duration = 70   # total duration including speed boost
+        self.final_duration = 70   # legacy cap (not used for recording anymore)
+        self.max_video_duration = 150  # hard cap for recording; cancel if >=2 points remain after this
         
         # Solution space for optimized generation
         self.solution_space = []
@@ -244,9 +245,8 @@ class VideoGenerator:
     def run_simulation_for_video(self, simulation, video_writer):
         """
         Run a simulation and record it to video at ACCELERATED speed.
-        This records the full 70-second video much faster than real-time by running
-        physics at accelerated speed but capturing frames at the correct intervals.
-        Returns True when completed successfully.
+        Recording ends when only one point remains. If after max_video_duration seconds
+        there are still at least two points, cancel and return False (caller deletes file).
         """
         start_time = time.time()
         frame_count = 0
@@ -254,29 +254,37 @@ class VideoGenerator:
         # Calculate time step - use accelerated physics but capture at regular intervals
         base_dt = 1.0 / self.fps
         accelerated_dt = base_dt * self.simulation_speed_multiplier
+
+        print(f"Recording until 1 point remains (max {self.max_video_duration}s) at {self.simulation_speed_multiplier}x speed...")
+        print(f"Maximum expected real-time: ~{self.max_video_duration / self.simulation_speed_multiplier:.1f}s")
+
+        speed_cap_removed = False
         
-        # Calculate total frames needed
-        target_frames = int(self.target_duration * self.fps)  # 60 seconds
-        final_frames = int(self.final_duration * self.fps)   # 70 seconds
-        
-        print(f"Recording {self.final_duration}s video at {self.simulation_speed_multiplier}x speed...")
-        print(f"Expected recording time: ~{self.final_duration / self.simulation_speed_multiplier:.1f}s real time")
-        
-        while frame_count < final_frames:
+        while True:
             # Calculate current video time
             video_time = frame_count / self.fps
             
-            # Remove speed cap at 60 seconds for chaotic finale
-            if frame_count == target_frames:
+            # Remove speed cap at target_duration for chaotic finale
+            if (not speed_cap_removed) and video_time >= self.target_duration:
                 print(f"Removing speed cap at {video_time:.0f}s for chaotic finale...")
-                original_max_speed = config.MAX_POINT_SPEED
                 config.MAX_POINT_SPEED = float('inf')
                 for point in simulation.points:
                     point.max_speed = float('inf')
+                speed_cap_removed = True
             
             # Run physics at accelerated speed for faster recording
             simulation.update_physics(accelerated_dt)
             
+            # Early termination: stop recording when <=1 point remains
+            if len(simulation.points) <= 1:
+                print(f"✓ Stopping recording at {video_time:.1f}s - {len(simulation.points)} point(s) remaining")
+                break
+
+            # Cancellation: if max duration reached and still >=2 points, cancel
+            if video_time >= self.max_video_duration and len(simulation.points) >= 2:
+                print(f"✗ Cancelling recording at {video_time:.1f}s - {len(simulation.points)} points still active")
+                return False
+
             # Debug: Print energy factor every 30 seconds to verify it's working
             if frame_count % (self.fps * 30) == 0 and frame_count > 0:
                 print(f"  Debug: video_time={video_time:.0f}s, energy_factor={simulation.energy_factor:.3f}, avg_speed={sum(point.get_speed() for point in simulation.points)/len(simulation.points):.1f}")
@@ -293,9 +301,9 @@ class VideoGenerator:
             # Print progress every 10 seconds of video time
             if frame_count % (self.fps * 10) == 0:
                 print(f"Recording progress: {video_time:.0f}s video time, {len(simulation.points)} points remaining")
-        
+
         elapsed_real_time = time.time() - start_time
-        print(f"✓ Video recording completed: {self.final_duration:.0f}s video (real time: {elapsed_real_time:.1f}s)")
+        print(f"✓ Video recording completed: {frame_count / self.fps:.1f}s video (real time: {elapsed_real_time:.1f}s)")
         return True
     
     def extract_simulation_state(self, simulation):
@@ -410,28 +418,28 @@ class VideoGenerator:
         for much higher success rate. Otherwise uses random generation.
         """
         successful_videos = []
-        
-        print(f"Starting video generation process...")
+
+        print("Starting video generation process...")
         print(f"Target: {num_videos} successful videos")
         print(f"Parameters: {num_points} points, energy factor {self.energy_factor}")
-        
+
         if use_solution_space and self.solution_space:
             print(f"Using optimized solution space with {len(self.solution_space)} solutions")
-            print(f"Expected success rate: ~95%+ (vs ~5% for random)")
+            print("Expected success rate: ~95%+ (vs ~5% for random)")
         else:
-            print(f"Using random generation (low success rate expected)")
-        
-        print(f"Duration: {self.target_duration}s normal + {self.final_duration - self.target_duration}s boosted = {self.final_duration}s total")
+            print("Using random generation (low success rate expected)")
+
+        print(f"Recording ends when 1 point remains (max {self.max_video_duration}s). Speed cap removed after {self.target_duration}s.")
         print(f"Output directory: {os.path.abspath(self.recordings_dir)}")
         print("-" * 60)
-        
+
         for video_num in range(1, num_videos + 1):
             print(f"\n=== VIDEO {video_num}/{num_videos} ===")
-            
+
             success = False
             for attempt in range(1, max_attempts_per_video + 1):
                 filename = self.generate_video(num_points, attempt, use_solution_space)
-                
+
                 if filename:
                     successful_videos.append(filename)
                     success = True
@@ -441,21 +449,21 @@ class VideoGenerator:
                         print(f"Attempt {attempt} failed unexpectedly (solution space should have high success rate)")
                     else:
                         print(f"Attempt {attempt} failed, retrying...")
-            
+
             if not success:
                 print(f"Failed to generate video {video_num} after {max_attempts_per_video} attempts")
-        
+
         print("\n" + "=" * 60)
-        print(f"GENERATION COMPLETE")
+        print("GENERATION COMPLETE")
         print(f"Successful videos: {len(successful_videos)}/{num_videos}")
-        
+
         if successful_videos:
             print("\nGenerated files:")
             for filename in successful_videos:
                 filepath = os.path.join(self.recordings_dir, filename)
                 file_size = os.path.getsize(filepath) / (1024 * 1024)  # MB
                 print(f"  - {filename} ({file_size:.1f} MB)")
-        
+
         return successful_videos
 
 def main():
