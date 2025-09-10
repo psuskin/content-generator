@@ -61,13 +61,16 @@ def run_simulation(
 	fps=120,
 ):
 	pygame.init()
-	screen = pygame.display.set_mode(window_size)
+	# Display scale: show more pixels while keeping proportions
+	display_scale = 1.0
+	screen_size = (int(window_size[0] * display_scale), int(window_size[1] * display_scale))
+	screen = pygame.display.set_mode(screen_size)
 	pygame.display.set_caption("n-gon in n-gon — elastic growth sim")
 	clock = pygame.time.Clock()
 	font = pygame.font.SysFont(None, 24)
 
 	# --- Rendering scale (supersampling for sharper image) ---
-	render_scale = 2.0  # internal rendering at 2x, then smooth downscale
+	render_scale = 3.0  # internal rendering at 3x, then smooth downscale
 	internal_size = (int(window_size[0] * render_scale), int(window_size[1] * render_scale))
 	canvas = pygame.Surface(internal_size)  # opaque draw target
 	# Persistent trail surface (draw once, then blit each frame onto canvas)
@@ -137,17 +140,17 @@ def run_simulation(
 
 	# --- Rainbow trail setup ---
 	trail = []  # kept for potential future use
-	trail_spacing = 6.0 * render_scale  # internal pixels between drops
+	trail_spacing = 5.0 * render_scale  # slightly more frequent drops
 	trail_max = 2000  # cap to avoid perf/memory blowup (not critical with persistent surface)
 	last_trail_x, last_trail_y = pos_x, pos_y
 	last_trail_r = r_small
 	trail_hue = 0.0
-	hue_step = 0.008  # hue increment per drop
+	hue_step = 0.007  # slightly reduced to keep gradient smooth with more drops
 	# Outline width (screen px) -> internal px
 	outline_screen_w = 3
 	outline_w = max(1, int(round(outline_screen_w * render_scale)))
-	# Shrink trail clones so outline stays inside the large polygon
-	outline_pad_internal = (outline_screen_w * 0.5 + 1.0) * render_scale
+	# No extra shrink; we'll place clones so the outer outline touches the boundary exactly
+	outline_pad_internal = 0.0
 
 	# If already at or above target size, clamp and freeze
 	if r_small >= R_large:
@@ -163,10 +166,128 @@ def run_simulation(
 			if event.type == pygame.QUIT:
 				running = False
 
-		# Integrate position (only while not finished)
+		# Integrate position with continuous-time collision resolution for straight trajectories
 		if not finished:
-			pos_x += vel_x * dt
-			pos_y += vel_y * dt
+			# Tiny pre-step correction if marginally outside due to numeric drift
+			max_pen0 = 0.0
+			hit_n0 = None
+			for idx, (e0, _e1, n_out) in enumerate(edges_pre):
+				nx, ny = n_out
+				d_center = (pos_x - e0[0]) * nx + (pos_y - e0[1]) * ny
+				worst = d_center + r_small * support_dot_max_unit[idx]
+				if worst > max_pen0:
+					max_pen0 = worst
+					hit_n0 = n_out
+			if max_pen0 > 0.0 and hit_n0 is not None:
+				nx, ny = hit_n0
+				pos_x -= nx * max_pen0
+				pos_y -= ny * max_pen0
+
+			# Swept step: find earliest collision time-of-impact within dt
+			t_remaining = dt
+			collisions_in_step = 0
+			# Limit iterations to avoid infinite loops on corner cases
+			for _sweep_iter in range(8):
+				# Find earliest positive t where we would violate a constraint
+				t_hit = None
+				hit_normal = None
+				for idx, (e0, _e1, n_out) in enumerate(edges_pre):
+					nx, ny = n_out
+					d_center = (pos_x - e0[0]) * nx + (pos_y - e0[1]) * ny
+					phi = d_center + r_small * support_dot_max_unit[idx]
+					# If already outside, ignore here (pre-step correction should have fixed it)
+					# Compute relative rate along normal
+					dv = vel_x * nx + vel_y * ny
+					if dv <= 0.0:
+						continue
+					# We are inside when phi <= 0. Impact when phi reaches 0 from below
+					# t = -phi / dv
+					t = -phi / dv
+					if 0.0 <= t <= t_remaining:
+						if t_hit is None or t < t_hit:
+							t_hit = t
+							hit_normal = n_out
+				# No collision within remaining time: advance and finish
+				if t_hit is None:
+					pos_x += vel_x * t_remaining
+					pos_y += vel_y * t_remaining
+					break
+				# Advance to impact, reflect, continue with remaining time
+				pos_x += vel_x * t_hit
+				pos_y += vel_y * t_hit
+				nx, ny = hit_normal
+				vel_x, vel_y = reflect_velocity(vel_x, vel_y, nx, ny)
+				# Extra trail drop exactly at collision point, projected to touch the boundary
+				pxc, pyc = pos_x, pos_y
+				r_draw_c = max(1.0, r_small - outline_pad_internal)
+				r_eff_c = r_draw_c + (outline_w * 0.5)
+				for _ in range(8):
+					max_pen_c = 0.0
+					hit_n_c = None
+					for idxc, (e0c, _e1c, n_outc) in enumerate(edges_pre):
+						nxc, nyc = n_outc
+						d_center_c = (pxc - e0c[0]) * nxc + (pyc - e0c[1]) * nyc
+						worst_c = d_center_c + r_eff_c * support_dot_max_unit[idxc]
+						if worst_c > max_pen_c:
+							max_pen_c = worst_c
+							hit_n_c = n_outc
+					if not (max_pen_c > 0.0 and hit_n_c is not None):
+						break
+					nxc, nyc = hit_n_c
+					pxc -= nxc * max_pen_c
+					pyc -= nyc * max_pen_c
+				# Final clamp w/o epsilon
+				max_pen_c = 0.0
+				hit_n_c = None
+				for idxc, (e0c, _e1c, n_outc) in enumerate(edges_pre):
+					nxc, nyc = n_outc
+					d_center_c = (pxc - e0c[0]) * nxc + (pyc - e0c[1]) * nyc
+					worst_c = d_center_c + r_eff_c * support_dot_max_unit[idxc]
+					if worst_c > max_pen_c:
+						max_pen_c = worst_c
+						hit_n_c = n_outc
+				if max_pen_c > 0.0 and hit_n_c is not None:
+					nxc, nyc = hit_n_c
+					pxc -= nxc * max_pen_c
+				# Draw the collision clone
+				h = (trail_hue % 1.0)
+				rf, gf, bf = colorsys.hsv_to_rgb(h, 0.85, 0.95)
+				color_c = (int(rf * 255), int(gf * 255), int(bf * 255))
+				poly_c = [(pxc + r_draw_c * ox, pyc + r_draw_c * oy) for (ox, oy) in unit_offsets]
+				verts_c = [(int(round(x)), int(round(y))) for x, y in poly_c]
+				pygame.draw.polygon(trail_surface, color_c, verts_c)
+				pygame.draw.polygon(trail_surface, (255, 255, 255), verts_c, width=outline_w)
+				trail_hue += hue_step
+				# Nudge slightly inside to avoid immediate re-hit due to precision
+				pos_x -= nx * 1e-6
+				pos_y -= ny * 1e-6
+				t_remaining -= t_hit
+				collisions_in_step += 1
+				if t_remaining <= 0.0:
+					break
+			# Growth and sound once per frame on first collision cluster
+			if collisions_in_step > 0 and collision_cooldown == 0:
+				if clack_sound is not None:
+					clack_sound.play()
+				current_small_width = 2.0 * r_small  # internal px
+				target_width_internal = large_width * render_scale
+				remaining = max(0.0, target_width_internal - current_small_width)
+				if remaining <= 0.0:
+					r_small = R_large
+					vel_x = 0.0
+					vel_y = 0.0
+					finished = True
+				else:
+					remaining_screen = remaining / render_scale
+					inc_screen = max(1.0, math.ceil(remaining_screen / 100.0))
+					inc_internal = min(inc_screen * render_scale, remaining)
+					r_small += inc_internal / 2.0
+					if r_small >= R_large:
+						r_small = R_large
+						vel_x = 0.0
+						vel_y = 0.0
+						finished = True
+				collision_cooldown = int(max(1, fps // 30))
 
 		# Build polygons (initial for collision checks)
 		def build_small_poly(xc, yc, rad):
@@ -174,56 +295,8 @@ def run_simulation(
 
 		small_poly = build_small_poly(pos_x, pos_y, r_small)
 
-		# Collision detection and growth only while not finished
-		if not finished:
-			# Support-based collision: center-plane distance + support radius
-			max_pen = 0.0
-			hit_normal = None
-			for idx, (e0, _e1, n_out) in enumerate(edges_pre):
-				nx, ny = n_out
-				d_center = (pos_x - e0[0]) * nx + (pos_y - e0[1]) * ny
-				worst = d_center + r_small * support_dot_max_unit[idx]
-				if worst > max_pen:
-					max_pen = worst
-					hit_normal = n_out
-
-			collided = max_pen > 0.0 and hit_normal is not None
-			if collided:
-				nx, ny = hit_normal
-				# Push small polygon inside by penetration depth along inward direction
-				pos_x -= nx * max_pen
-				pos_y -= ny * max_pen
-				# Reflect velocity (perfectly elastic)
-				vel_x, vel_y = reflect_velocity(vel_x, vel_y, nx, ny)
-				# Growth on collision (once per cluster of contacts) with clamp to large size
-				if collision_cooldown == 0:
-					# Play clack sound once per collision cluster (if audio available)
-					if clack_sound is not None:
-						clack_sound.play()
-					current_small_width = 2.0 * r_small  # internal px
-					target_width_internal = large_width * render_scale
-					remaining = max(0.0, target_width_internal - current_small_width)
-					if remaining <= 0.0:
-						# Reached or exceeded target size: clamp and finish
-						r_small = R_large
-						vel_x = 0.0
-						vel_y = 0.0
-						finished = True
-					else:
-						# Compute increment in screen px then scale to internal px to preserve behavior
-						remaining_screen = remaining / render_scale
-						inc_screen = max(1.0, math.ceil(remaining_screen / 100.0))
-						inc_internal = inc_screen * render_scale
-						inc_internal = min(inc_internal, remaining)  # do not overshoot
-						r_small += inc_internal / 2.0
-						if r_small >= R_large:
-							r_small = R_large
-							vel_x = 0.0
-							vel_y = 0.0
-							finished = True
-					collision_cooldown = int(max(1, fps // 30))  # ~1-2 frames
-			if collision_cooldown > 0:
-				collision_cooldown -= 1
+		if collision_cooldown > 0:
+			collision_cooldown -= 1
 
 		# Final clamp check independent of collisions
 		if not finished and 2.0 * r_small >= (large_width * render_scale):
@@ -253,15 +326,16 @@ def run_simulation(
 					r_at = last_trail_r + (r_small - last_trail_r) * tseg
 					# Shrink so that outline stays inside the boundary
 					r_draw = max(1.0, r_at - outline_pad_internal)
-					# Project sample inside the large polygon if slightly outside
-					# Do up to two correction passes using the worst-penetration edge
-					for _ in range(6):
+					# Project sample so that the outer outline touches the boundary.
+					# Use an effective radius that includes half the outline width.
+					r_eff = r_draw + (outline_w * 0.5)
+					for _ in range(8):
 						max_pen_s = 0.0
 						hit_n_s = None
 						for idx, (e0s, _e1s, n_outs) in enumerate(edges_pre):
 							nx, ny = n_outs
 							d_center = (px - e0s[0]) * nx + (py - e0s[1]) * ny
-							worst = d_center + r_draw * support_dot_max_unit[idx]
+							worst = d_center + r_eff * support_dot_max_unit[idx]
 							if worst > max_pen_s:
 								max_pen_s = worst
 								hit_n_s = n_outs
@@ -270,19 +344,19 @@ def run_simulation(
 						nx, ny = hit_n_s
 						px -= nx * max_pen_s
 						py -= ny * max_pen_s
-					# One last clamp if still slightly outside
+					# One last clamp if still slightly outside (no extra epsilon to avoid visible gap)
 					max_pen_s = 0.0
 					hit_n_s = None
 					for idx, (e0s, _e1s, n_outs) in enumerate(edges_pre):
 						nx, ny = n_outs
 						d_center = (px - e0s[0]) * nx + (py - e0s[1]) * ny
-						worst = d_center + r_draw * support_dot_max_unit[idx]
+						worst = d_center + r_eff * support_dot_max_unit[idx]
 						if worst > max_pen_s:
 							max_pen_s = worst
 							hit_n_s = n_outs
 					if max_pen_s > 0.0 and hit_n_s is not None:
 						nx, ny = hit_n_s
-						px -= nx * (max_pen_s + 1e-6)
+						px -= nx * max_pen_s
 					# Color from HSV rainbow (soft saturation/value)
 					h = (trail_hue % 1.0)
 					rf, gf, bf = colorsys.hsv_to_rgb(h, 0.85, 0.95)
@@ -313,7 +387,7 @@ def run_simulation(
 		pygame.draw.polygon(canvas, (255, 255, 255), small_verts_draw)
 
 		# Scale down to screen with smoothing for crisp edges
-		scaled = pygame.transform.smoothscale(canvas, window_size)
+		scaled = pygame.transform.smoothscale(canvas, screen_size)
 		screen.blit(scaled, (0, 0))
 
 		# HUD text (draw after scaling to keep text size consistent)
@@ -337,7 +411,7 @@ def main():
 	parser = argparse.ArgumentParser(description="Small regular n-gon bouncing inside a larger same n-gon (elastic, growth on collisions)")
 	parser.add_argument("--sides", type=int, default=3, help="Number of sides for both polygons (>=3)")
 	parser.add_argument("--large", type=float, default=500.0, help="Large polygon width in pixels (across)")
-	parser.add_argument("--small", type=float, default=10.0, help="Small polygon starting width in pixels (across)")
+	parser.add_argument("--small", type=float, default=15.0, help="Small polygon starting width in pixels (across)")
 	parser.add_argument("--speed", type=float, default=300.0, help="Initial speed to the right in px/s")
 	parser.add_argument("--fps", type=int, default=120, help="Target FPS")
 	args = parser.parse_args()
