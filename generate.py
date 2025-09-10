@@ -24,8 +24,8 @@ class VideoGenerator:
         self.fps = fps
         self.simulation_speed_multiplier = simulation_speed_multiplier  # How much faster to run simulation
         self.target_duration = 60  # seconds to run before speed boost
-        self.final_duration = 70   # legacy cap (not used for recording anymore)
-        self.max_video_duration = 150  # hard cap for recording; cancel if >=2 points remain after this
+        self.final_duration = 75   # legacy cap (not used for recording anymore)
+        self.max_video_duration = 90  # hard cap for recording; cancel if >=2 points remain after this
         
         # Solution space for optimized generation
         self.solution_space = []
@@ -203,12 +203,14 @@ class VideoGenerator:
         # Calculate time step for accelerated simulation
         base_dt = 1.0 / self.fps
         
-        # Calculate total frames needed for target duration (in normal time)
+        # Calculate total frames for 60s and 90s (in normal time)
         target_frames = int(self.target_duration * self.fps)
+        max_frames = int(self.max_video_duration * self.fps)
         
         print(f"Testing simulation viability with {len(simulation.points)} points, energy factor {self.energy_factor}")
         print(f"Testing at {self.simulation_speed_multiplier}x speed for faster evaluation...")
         
+        # Phase 1: ensure at least 2 points remain at target_duration
         while frame_count < target_frames:
             current_real_time = time.time()
             elapsed_real_time = current_real_time - start_time
@@ -227,7 +229,6 @@ class VideoGenerator:
                 return False
             
             # Run accelerated physics with larger time step for faster testing
-            # This is more accurate than multiple small updates
             accelerated_dt = base_dt * self.simulation_speed_multiplier
             simulation.update_physics(accelerated_dt)
             
@@ -238,9 +239,39 @@ class VideoGenerator:
                 actual_speedup = video_time / elapsed_real_time if elapsed_real_time > 0 else 0
                 print(f"  Test progress: {video_time:.1f}s video time ({elapsed_real_time:.1f}s real, {actual_speedup:.1f}x speed), Points: {len(simulation.points)}")
         
+        # Phase 1 passed: at least 2 points survived until target_duration
         elapsed_real_time = time.time() - start_time
-        print(f"✓ Test passed: {self.target_duration:.0f}s simulation with {len(simulation.points)} points (real time: {elapsed_real_time:.1f}s)")
-        return True
+        print(f"✓ Test phase 1 passed: {self.target_duration:.0f}s with {len(simulation.points)} points remaining (real: {elapsed_real_time:.1f}s)")
+
+        # Phase 2: Ensure that by max_video_duration we will have <=1 point remaining
+        # Mimic recording behavior: remove per-point speed cap after target_duration for finale
+        for p in simulation.points:
+            try:
+                p.max_speed = float('inf')
+            except Exception:
+                pass
+        print("Checking end condition: must reach 1 point by 90s (to avoid recording cancellation)...")
+
+        while frame_count < max_frames:
+            # Advance physics at accelerated speed
+            accelerated_dt = base_dt * self.simulation_speed_multiplier
+            simulation.update_physics(accelerated_dt)
+
+            video_time = frame_count / self.fps
+            frame_count += 1
+
+            # Success as soon as we reach <=1 point (recording would stop then)
+            if len(simulation.points) <= 1:
+                print(f"✓ End-condition achieved at {video_time:.1f}s - {len(simulation.points)} point(s) remain")
+                return True
+
+            # Occasional progress
+            if frame_count % (self.fps * 10) == 0:
+                print(f"  Test phase 2 progress: {video_time:.0f}s, points remaining: {len(simulation.points)}")
+
+        # If we get here, 90s elapsed and still >=2 points => would be cancelled during recording
+        print(f"✗ Test failed: ≥2 points remain at {self.max_video_duration:.0f}s (would cancel recording)")
+        return False
     
     def run_simulation_for_video(self, simulation, video_writer):
         """
@@ -259,6 +290,9 @@ class VideoGenerator:
         print(f"Maximum expected real-time: ~{self.max_video_duration / self.simulation_speed_multiplier:.1f}s")
 
         speed_cap_removed = False
+        # After reaching 1 point, keep recording an additional 2 seconds
+        end_grace_frames = int(2 * self.fps)
+        grace_frames_remaining = None
         
         while True:
             # Calculate current video time
@@ -275,15 +309,25 @@ class VideoGenerator:
             # Run physics at accelerated speed for faster recording
             simulation.update_physics(accelerated_dt)
             
-            # Early termination: stop recording when <=1 point remains
-            if len(simulation.points) <= 1:
-                print(f"✓ Stopping recording at {video_time:.1f}s - {len(simulation.points)} point(s) remaining")
-                break
+            # Early-cancel: If before 50s the remaining points have an average speed
+            # >= 95% of the configured maximum speed, cancel recording.
+            # This prevents overly fast, uninteresting runs early on.
+            if video_time < 50 and len(simulation.points) > 0:
+                try:
+                    avg_speed = sum(p.get_speed() for p in simulation.points) / len(simulation.points)
+                except Exception:
+                    avg_speed = 0.0
+                # Use the global speed cap; before 60s we have not removed it
+                speed_cap = getattr(config, 'MAX_POINT_SPEED', None)
+                if isinstance(speed_cap, (int, float)) and speed_cap > 0:
+                    if avg_speed >= 0.95 * float(speed_cap):
+                        print(f"✗ Cancelling: avg speed {avg_speed:.1f} ≥ 95% of cap {0.95 * float(speed_cap):.1f} before 50s")
+                        return False
 
-            # Cancellation: if max duration reached and still >=2 points, cancel
-            if video_time >= self.max_video_duration and len(simulation.points) >= 2:
-                print(f"✗ Cancelling recording at {video_time:.1f}s - {len(simulation.points)} points still active")
-                return False
+            # Start final grace period once <=1 point remains
+            if grace_frames_remaining is None and len(simulation.points) <= 1:
+                grace_frames_remaining = end_grace_frames
+                print(f"✓ Final phase: 1 point remains at {video_time:.1f}s — capturing extra 2.0s...")
 
             # Debug: Print energy factor every 30 seconds to verify it's working
             if frame_count % (self.fps * 30) == 0 and frame_count > 0:
@@ -301,6 +345,13 @@ class VideoGenerator:
             # Print progress every 10 seconds of video time
             if frame_count % (self.fps * 10) == 0:
                 print(f"Recording progress: {video_time:.0f}s video time, {len(simulation.points)} points remaining")
+
+            # If in final grace phase, count down and stop when finished
+            if grace_frames_remaining is not None:
+                grace_frames_remaining -= 1
+                if grace_frames_remaining <= 0:
+                    print(f"✓ Stopping recording at {frame_count / self.fps:.1f}s - final 2.0s tail captured")
+                    break
 
         elapsed_real_time = time.time() - start_time
         print(f"✓ Video recording completed: {frame_count / self.fps:.1f}s video (real time: {elapsed_real_time:.1f}s)")
@@ -500,7 +551,7 @@ def main():
     
     print("Success criteria:")
     print("- Must survive 60+ seconds with at least 2 points")
-    print("- Speed cap removed at 60s for final 10s of chaos")
+    print("- Speed cap removed at 60s for final 15s of chaos")
     print("- Simulations with <2 points before 60s are discarded")
     print(f"- Testing speed: {SIMULATION_SPEED_MULTIPLIER}x (video recording: 1x real-time)")
     print("-" * 50)
