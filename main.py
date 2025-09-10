@@ -119,8 +119,8 @@ class Line:
     
     def check_point_line_intersection(self, test_point, center_x, center_y, radius, points):
         """
-        Simple, robust line intersection check.
-        Returns True if point crosses the line (should trigger state change).
+        Center-path intersection check.
+        Returns True if the center path of the moving point (prev->curr) crosses this line segment.
         """
         # Skip own lines (point can't cross its own lines)
         if test_point.id == self.point_id:
@@ -138,47 +138,89 @@ class Line:
             else:
                 del self.collision_cooldown[test_point.id]
         
-        # Get line endpoints
+        # Get static wall endpoint
         wall_x, wall_y = self.get_wall_position(center_x, center_y, radius)
-        point_x, point_y = self.get_point_position(points)
-        
-        if point_x is None or point_y is None:
+
+        # Find owning point object (for prev/current interpolation)
+        owner_point = None
+        for p in points:
+            if p.id == self.point_id:
+                owner_point = p
+                break
+        if owner_point is None:
             return False
-        
-        # Simple distance-to-line calculation
-        # Vector from point to wall
-        line_dx = wall_x - point_x
-        line_dy = wall_y - point_y
-        line_length_sq = line_dx * line_dx + line_dy * line_dy
-        
-        if line_length_sq < 1:  # Line too short
+
+        # Quick reject if positions are not finite
+        if not all(
+            math.isfinite(v)
+            for v in [
+                test_point.prev_x, test_point.prev_y, test_point.x, test_point.y,
+                owner_point.prev_x, owner_point.prev_y, owner_point.x, owner_point.y,
+                wall_x, wall_y,
+            ]
+        ):
             return False
-        
-        # Vector from point to test point
-        test_dx = test_point.x - point_x
-        test_dy = test_point.y - point_y
-        
-        # Project test point onto line
-        t = (test_dx * line_dx + test_dy * line_dy) / line_length_sq
-        t = max(0, min(1, t))  # Clamp to line segment
-        
-        # Closest point on line
-        closest_x = point_x + t * line_dx
-        closest_y = point_y + t * line_dy
-        
-        # Distance from test point to line
-        dist_x = test_point.x - closest_x
-        dist_y = test_point.y - closest_y
-        distance = math.sqrt(dist_x * dist_x + dist_y * dist_y)
-        
-        # Check if close enough to line to count as intersection
-        collision_threshold = config.LINE_COLLISION_TOLERANCE + test_point.radius
-        
-        if distance < collision_threshold:
-            # Set cooldown to prevent rapid repeated hits
-            self.collision_cooldown[test_point.id] = 30  # 30 frames = 0.5 seconds at 60fps
-            return True
-        
+
+        # Time-synchronized sampling: detect sign change of the point center relative to line W->P(t)
+        subdivisions = getattr(config, 'LINE_COLLISION_SUBDIVISIONS', 6)
+        try:
+            n = int(subdivisions)
+        except Exception:
+            n = 6
+        n = max(2, min(16, n))  # need at least 2 samples to detect a change
+
+        def lerp(a, b, t):
+            return a + (b - a) * t
+
+        def orient_wpw(w_x, w_y, p_x, p_y, a_x, a_y):
+            # cross((P-W), (A-W))
+            return (p_x - w_x) * (a_y - w_y) - (p_y - w_y) * (a_x - w_x)
+
+        def projection_param_on_segment(w_x, w_y, p_x, p_y, a_x, a_y):
+            vx = p_x - w_x
+            vy = p_y - w_y
+            denom = vx * vx + vy * vy
+            if denom <= 1e-12:
+                return None
+            ux = a_x - w_x
+            uy = a_y - w_y
+            return (ux * vx + uy * vy) / denom
+
+        eps = 1e-9
+        s_prev = None
+        t_prev = None
+        for k in range(n + 1):
+            t = k / n
+            px = lerp(owner_point.prev_x, owner_point.x, t)
+            py = lerp(owner_point.prev_y, owner_point.y, t)
+            ax = lerp(test_point.prev_x, test_point.x, t)
+            ay = lerp(test_point.prev_y, test_point.y, t)
+
+            s = orient_wpw(wall_x, wall_y, px, py, ax, ay)
+            alpha = projection_param_on_segment(wall_x, wall_y, px, py, ax, ay)
+
+            # Direct on-line check at sample
+            if alpha is not None and -1e-6 <= alpha <= 1 + 1e-6 and abs(s) <= eps:
+                self.collision_cooldown[test_point.id] = 30
+                return True
+
+            if s_prev is not None:
+                # If orientation flips between samples and projection falls on segment vicinity, treat as crossing
+                if s * s_prev < 0:
+                    # Check mid sample for projection inside segment
+                    tm = (t + t_prev) * 0.5
+                    pmx = lerp(owner_point.prev_x, owner_point.x, tm)
+                    pmy = lerp(owner_point.prev_y, owner_point.y, tm)
+                    amx = lerp(test_point.prev_x, test_point.x, tm)
+                    amy = lerp(test_point.prev_y, test_point.y, tm)
+                    alpha_mid = projection_param_on_segment(wall_x, wall_y, pmx, pmy, amx, amy)
+                    if alpha_mid is not None and -1e-6 <= alpha_mid <= 1 + 1e-6:
+                        self.collision_cooldown[test_point.id] = 30
+                        return True
+
+            s_prev = s
+            t_prev = t
+
         return False
 
 class Point:
@@ -388,11 +430,13 @@ class CircleSimulation:
     def check_line_collisions(self):
         """Check if any points cross lines of different colors using SIMPLE, ROBUST collision detection."""
         lines_to_remove = []
+        processed_lines = set()  # Ensure max one state change per line per frame
         
         # Check each point against all lines
         for point in self.points:
             for line_id, line in self.lines.items():
-                if not line.active:
+                # Skip already processed lines this frame or inactive ones
+                if not line.active or line_id in processed_lines:
                     continue
                 
                 # Use simple, robust intersection check
@@ -405,6 +449,9 @@ class CircleSimulation:
                         # Second crossing: remove line
                         line.active = False
                         lines_to_remove.append(line_id)
+                    
+                    # Only one transition per line per frame
+                    processed_lines.add(line_id)
         
         # Remove inactive lines
         self._remove_lines(lines_to_remove)
