@@ -297,6 +297,119 @@ class Line:
 
         return False
 
+    def count_point_line_intersections(self, test_point, center_x, center_y, radius, points):
+        """Return 0, 1, or 2 intersections between test_point center-path and this dynamic line within current frame.
+        Does NOT touch cooldown. Skips own lines and same-color interactions.
+        """
+        if test_point.id == self.point_id:
+            return 0
+        if test_point.color == self.color:
+            return 0
+
+        wall_x, wall_y = self.get_wall_position(center_x, center_y, radius)
+
+        owner_point = None
+        for p in points:
+            if p.id == self.point_id:
+                owner_point = p
+                break
+        if owner_point is None:
+            return 0
+
+        if not all(
+            math.isfinite(v)
+            for v in [
+                test_point.prev_x, test_point.prev_y, test_point.x, test_point.y,
+                owner_point.prev_x, owner_point.prev_y, owner_point.x, owner_point.y,
+                wall_x, wall_y,
+            ]
+        ):
+            return 0
+
+        P0x, P0y = test_point.prev_x, test_point.prev_y
+        P1x, P1y = test_point.x, test_point.y
+        dPx, dPy = (P1x - P0x), (P1y - P0y)
+
+        O0x, O0y = owner_point.prev_x, owner_point.prev_y
+        O1x, O1y = owner_point.x, owner_point.y
+        dOx, dOy = (O1x - O0x), (O1y - O0y)
+
+        Wx, Wy = wall_x, wall_y
+
+        Ax, Ay = (P0x - Wx), (P0y - Wy)
+        Bx, By = (O0x - Wx), (O0y - Wy)
+
+        def cross2(x1, y1, x2, y2):
+            return x1 * y2 - y1 * x2
+
+        def dot2(x1, y1, x2, y2):
+            return x1 * x2 + y1 * y2
+
+        C2 = cross2(dPx, dPy, dOx, dOy)
+        C1 = cross2(dPx, dPy, Bx, By) + cross2(Ax, Ay, dOx, dOy)
+        C0 = cross2(Ax, Ay, Bx, By)
+
+        eps = 1e-9
+
+        def on_segment_at_t(t):
+            if t < -1e-6 or t > 1 + 1e-6:
+                return False
+            t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+            Px = P0x + dPx * t
+            Py = P0y + dPy * t
+            Ox = O0x + dOx * t
+            Oy = O0y + dOy * t
+            vx, vy = (Wx - Ox), (Wy - Oy)
+            denom = dot2(vx, vy, vx, vy)
+            if denom <= eps:
+                return (abs(Px - Wx) <= 1e-6 and abs(Py - Wy) <= 1e-6)
+            sx, sy = (Px - Ox), (Py - Oy)
+            s = dot2(sx, sy, vx, vy) / denom
+            if s < -1e-6 or s > 1 + 1e-6:
+                return False
+            dist_perp = abs(cross2(sx, sy, vx, vy)) / math.sqrt(denom)
+            return dist_perp <= 1e-5
+
+        roots = []
+        count = 0
+        if abs(C2) > eps:
+            disc = C1 * C1 - 4.0 * C2 * C0
+            if disc >= -1e-12:
+                if disc < 0.0:
+                    disc = 0.0
+                sqrt_disc = math.sqrt(disc)
+                t1 = (-C1 - sqrt_disc) / (2.0 * C2)
+                t2 = (-C1 + sqrt_disc) / (2.0 * C2)
+                roots.extend([t1, t2])
+        else:
+            if abs(C1) > eps:
+                roots.append(-C0 / C1)
+            else:
+                # Fully collinear or never
+                if abs(C0) <= 1e-12:
+                    # Treat as at least one intersection within [0,1] if any point lies on the segment
+                    for t in (0.0, 0.5, 1.0):
+                        if on_segment_at_t(t):
+                            return 1
+                    return 0
+                else:
+                    return 0
+
+        # Deduplicate roots by epsilon and count those that pass segment test
+        uniq = []
+        for t in roots:
+            dupe = False
+            for u in uniq:
+                if abs(t - u) <= 1e-6:
+                    dupe = True
+                    break
+            if not dupe:
+                uniq.append(t)
+        for t in uniq:
+            if on_segment_at_t(t):
+                count += 1
+        return count
+
 class Point:
     """
     Represents a point in the simulation with position, velocity, and physics properties.
@@ -504,38 +617,52 @@ class CircleSimulation:
     def check_line_collisions(self):
         """Check if any points cross lines of different colors using SIMPLE, ROBUST collision detection."""
         lines_to_remove = []
-        # Aggregate unique crossings per line within this frame
-        collisions_per_line = {}  # line_id -> set(point_id)
+        # Decrement cooldowns at frame start
+        for line in self.lines.values():
+            if not line.active:
+                continue
+            if line.collision_cooldown:
+                for pid in list(line.collision_cooldown.keys()):
+                    line.collision_cooldown[pid] -= 1
+                    if line.collision_cooldown[pid] <= 0:
+                        del line.collision_cooldown[pid]
 
-        # Check each point against all lines and record hits
+        # Aggregate counts per line and per point
+        # collisions_per_line: line_id -> {point_id: count}
+        collisions_per_line = {}
         for point in self.points:
             for line_id, line in self.lines.items():
                 if not line.active:
                     continue
-                if line.check_point_line_intersection(point, self.center_x, self.center_y, self.circle_radius, self.points):
-                    s = collisions_per_line.setdefault(line_id, set())
-                    s.add(point.id)
+                # Respect cooldown across frames (but not within this frame)
+                if point.id in line.collision_cooldown:
+                    continue
+                c = line.count_point_line_intersections(point, self.center_x, self.center_y, self.circle_radius, self.points)
+                if c > 0:
+                    d = collisions_per_line.setdefault(line_id, {})
+                    d[point.id] = d.get(point.id, 0) + c
 
-        # Apply results in a second pass to allow multiple transitions per line per frame
-        for line_id, point_ids in collisions_per_line.items():
+        # Apply results after scanning all pairs
+        for line_id, by_point in collisions_per_line.items():
             if line_id not in self.lines:
                 continue
             line = self.lines[line_id]
             if not line.active:
                 continue
-            hit_count = len(point_ids)
+            total_hits = sum(by_point.values())
             if not line.dashed:
-                # If two or more distinct points hit in the same frame, remove directly; otherwise dash
-                if hit_count >= 2:
+                if total_hits >= 2:
                     line.active = False
                     lines_to_remove.append(line_id)
-                elif hit_count == 1:
+                elif total_hits == 1:
                     line.dashed = True
             else:
-                # Already dashed: any hit removes
-                if hit_count >= 1:
+                if total_hits >= 1:
                     line.active = False
                     lines_to_remove.append(line_id)
+            # Set cooldown for contributing points
+            for pid in by_point.keys():
+                line.collision_cooldown[pid] = 30
 
         # Remove inactive lines
         self._remove_lines(lines_to_remove)
