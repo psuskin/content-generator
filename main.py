@@ -161,65 +161,139 @@ class Line:
         ):
             return False
 
-        # Time-synchronized sampling: detect sign change of the point center relative to line W->P(t)
-        subdivisions = getattr(config, 'LINE_COLLISION_SUBDIVISIONS', 6)
-        try:
-            n = int(subdivisions)
-        except Exception:
-            n = 6
-        n = max(2, min(16, n))  # need at least 2 samples to detect a change
+        # Exact continuous-time detection via solving cross((P(t)-W), (O(t)-W)) = 0 for t in [0,1]
+        # Then verify P(t) lies between O(t) and W (segment bounds).
+        P0x, P0y = test_point.prev_x, test_point.prev_y
+        P1x, P1y = test_point.x, test_point.y
+        dPx, dPy = (P1x - P0x), (P1y - P0y)
 
-        def lerp(a, b, t):
-            return a + (b - a) * t
+        O0x, O0y = owner_point.prev_x, owner_point.prev_y
+        O1x, O1y = owner_point.x, owner_point.y
+        dOx, dOy = (O1x - O0x), (O1y - O0y)
 
-        def orient_wpw(w_x, w_y, p_x, p_y, a_x, a_y):
-            # cross((P-W), (A-W))
-            return (p_x - w_x) * (a_y - w_y) - (p_y - w_y) * (a_x - w_x)
+        Wx, Wy = wall_x, wall_y
 
-        def projection_param_on_segment(w_x, w_y, p_x, p_y, a_x, a_y):
-            vx = p_x - w_x
-            vy = p_y - w_y
-            denom = vx * vx + vy * vy
-            if denom <= 1e-12:
-                return None
-            ux = a_x - w_x
-            uy = a_y - w_y
-            return (ux * vx + uy * vy) / denom
+        Ax, Ay = (P0x - Wx), (P0y - Wy)
+        Bx, By = (O0x - Wx), (O0y - Wy)
+
+        def cross2(x1, y1, x2, y2):
+            return x1 * y2 - y1 * x2
+
+        def dot2(x1, y1, x2, y2):
+            return x1 * x2 + y1 * y2
+
+        # c(t) = C2*t^2 + C1*t + C0
+        C2 = cross2(dPx, dPy, dOx, dOy)
+        C1 = cross2(dPx, dPy, Bx, By) + cross2(Ax, Ay, dOx, dOy)
+        C0 = cross2(Ax, Ay, Bx, By)
 
         eps = 1e-9
-        s_prev = None
-        t_prev = None
-        for k in range(n + 1):
-            t = k / n
-            px = lerp(owner_point.prev_x, owner_point.x, t)
-            py = lerp(owner_point.prev_y, owner_point.y, t)
-            ax = lerp(test_point.prev_x, test_point.x, t)
-            ay = lerp(test_point.prev_y, test_point.y, t)
 
-            s = orient_wpw(wall_x, wall_y, px, py, ax, ay)
-            alpha = projection_param_on_segment(wall_x, wall_y, px, py, ax, ay)
+        def check_t(t):
+            if t < -1e-6 or t > 1 + 1e-6:
+                return False
+            # Clamp t to [0,1] for numerical stability
+            t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+            # Positions at time t
+            Px = P0x + dPx * t
+            Py = P0y + dPy * t
+            Ox = O0x + dOx * t
+            Oy = O0y + dOy * t
+            vx, vy = (Wx - Ox), (Wy - Oy)  # segment vector O(t)->W
+            denom = dot2(vx, vy, vx, vy)
+            if denom <= eps:
+                # Degenerate segment (owner at wall). Consider hit only if P ≈ W
+                if (abs(Px - Wx) <= 1e-6 and abs(Py - Wy) <= 1e-6):
+                    return True
+                return False
+            sx, sy = (Px - Ox), (Py - Oy)
+            s = dot2(sx, sy, vx, vy) / denom
+            if s < -1e-6 or s > 1 + 1e-6:
+                return False
+            # Optional: ensure near-collinearity numerically
+            dist_perp = abs(cross2(sx, sy, vx, vy)) / math.sqrt(denom)
+            return dist_perp <= 1e-5
 
-            # Direct on-line check at sample
-            if alpha is not None and -1e-6 <= alpha <= 1 + 1e-6 and abs(s) <= eps:
+        roots = []
+        if abs(C2) > eps:
+            disc = C1 * C1 - 4.0 * C2 * C0
+            if disc >= -1e-12:
+                if disc < 0.0:
+                    disc = 0.0
+                sqrt_disc = math.sqrt(disc)
+                t1 = (-C1 - sqrt_disc) / (2.0 * C2)
+                t2 = (-C1 + sqrt_disc) / (2.0 * C2)
+                roots.extend([t1, t2])
+        else:
+            # Linear or constant
+            if abs(C1) > eps:
+                t = -C0 / C1
+                roots.append(t)
+            else:
+                # Constant: either always collinear (C0≈0) or never
+                if abs(C0) <= 1e-12:
+                    # Fully collinear over the frame: decide if exists t with P between O and W.
+                    # Use a fixed unit direction u along the common line and analyze h(t) = f(t)*(f(t)-g(t)) <= 0.
+                    # f(t) = dot(P(t)-W, u) = aP + bP t; g(t) = dot(O(t)-W, u) = aO + bO t
+                    # Choose direction u
+                    dirx, diry = Ax, Ay
+                    if abs(dirx) + abs(diry) <= 1e-12:
+                        dirx, diry = Bx, By
+                    if abs(dirx) + abs(diry) <= 1e-12:
+                        # Fall back to movement dir to define the line
+                        dirx, diry = (dPx if abs(dPx) >= abs(dOx) else dOx), (dPy if abs(dPy) >= abs(dOy) else dOy)
+                    norm = math.hypot(dirx, diry)
+                    if norm <= 1e-15:
+                        # Pathologically degenerate; no reliable intersection
+                        return False
+                    ux, uy = dirx / norm, diry / norm
+
+                    aP = dot2(Ax, Ay, ux, uy)
+                    bP = dot2(dPx, dPy, ux, uy)
+                    aO = dot2(Bx, By, ux, uy)
+                    bO = dot2(dOx, dOy, ux, uy)
+
+                    # h(t) = f^2 - f*g = (bP^2 - bP*bO) t^2 + (2 aP bP - aP bO - aO bP) t + (aP^2 - aP aO)
+                    qa = (bP * bP - bP * bO)
+                    qb = (2.0 * aP * bP - aP * bO - aO * bP)
+                    qc = (aP * aP - aP * aO)
+
+                    def h(t):
+                        return ((qa * t + qb) * t + qc)
+
+                    # Check if h(t) <= 0 for some t in [0,1]
+                    # Consider roots and interval signs
+                    candidates = [0.0, 1.0]
+                    if abs(qa) > 1e-15:
+                        disc2 = qb * qb - 4.0 * qa * qc
+                        if disc2 >= -1e-12:
+                            if disc2 < 0.0:
+                                disc2 = 0.0
+                            r = math.sqrt(disc2)
+                            candidates.extend([(-qb - r) / (2.0 * qa), (-qb + r) / (2.0 * qa)])
+                    elif abs(qb) > 1e-15:
+                        candidates.append(-qc / qb)
+
+                    # Evaluate midpoints between sorted candidates inside [0,1]
+                    candidates = [t for t in candidates if -1e-6 <= t <= 1 + 1e-6]
+                    candidates = sorted(set(max(0.0, min(1.0, t)) for t in candidates))
+                    eval_points = set(candidates)
+                    for i in range(len(candidates) - 1):
+                        mid = 0.5 * (candidates[i] + candidates[i + 1])
+                        eval_points.add(mid)
+                    for t in eval_points:
+                        if h(t) <= 1e-10:
+                            self.collision_cooldown[test_point.id] = 30
+                            return True
+                    return False
+                else:
+                    # Not collinear anywhere in the frame
+                    return False
+
+        for t in roots:
+            if check_t(t):
                 self.collision_cooldown[test_point.id] = 30
                 return True
-
-            if s_prev is not None:
-                # If orientation flips between samples and projection falls on segment vicinity, treat as crossing
-                if s * s_prev < 0:
-                    # Check mid sample for projection inside segment
-                    tm = (t + t_prev) * 0.5
-                    pmx = lerp(owner_point.prev_x, owner_point.x, tm)
-                    pmy = lerp(owner_point.prev_y, owner_point.y, tm)
-                    amx = lerp(test_point.prev_x, test_point.x, tm)
-                    amy = lerp(test_point.prev_y, test_point.y, tm)
-                    alpha_mid = projection_param_on_segment(wall_x, wall_y, pmx, pmy, amx, amy)
-                    if alpha_mid is not None and -1e-6 <= alpha_mid <= 1 + 1e-6:
-                        self.collision_cooldown[test_point.id] = 30
-                        return True
-
-            s_prev = s
-            t_prev = t
 
         return False
 
@@ -430,29 +504,39 @@ class CircleSimulation:
     def check_line_collisions(self):
         """Check if any points cross lines of different colors using SIMPLE, ROBUST collision detection."""
         lines_to_remove = []
-        processed_lines = set()  # Ensure max one state change per line per frame
-        
-        # Check each point against all lines
+        # Aggregate unique crossings per line within this frame
+        collisions_per_line = {}  # line_id -> set(point_id)
+
+        # Check each point against all lines and record hits
         for point in self.points:
             for line_id, line in self.lines.items():
-                # Skip already processed lines this frame or inactive ones
-                if not line.active or line_id in processed_lines:
+                if not line.active:
                     continue
-                
-                # Use simple, robust intersection check
                 if line.check_point_line_intersection(point, self.center_x, self.center_y, self.circle_radius, self.points):
-                    # A crossing was detected!
-                    if not line.dashed:
-                        # First crossing: make line dashed
-                        line.dashed = True
-                    else:
-                        # Second crossing: remove line
-                        line.active = False
-                        lines_to_remove.append(line_id)
-                    
-                    # Only one transition per line per frame
-                    processed_lines.add(line_id)
-        
+                    s = collisions_per_line.setdefault(line_id, set())
+                    s.add(point.id)
+
+        # Apply results in a second pass to allow multiple transitions per line per frame
+        for line_id, point_ids in collisions_per_line.items():
+            if line_id not in self.lines:
+                continue
+            line = self.lines[line_id]
+            if not line.active:
+                continue
+            hit_count = len(point_ids)
+            if not line.dashed:
+                # If two or more distinct points hit in the same frame, remove directly; otherwise dash
+                if hit_count >= 2:
+                    line.active = False
+                    lines_to_remove.append(line_id)
+                elif hit_count == 1:
+                    line.dashed = True
+            else:
+                # Already dashed: any hit removes
+                if hit_count >= 1:
+                    line.active = False
+                    lines_to_remove.append(line_id)
+
         # Remove inactive lines
         self._remove_lines(lines_to_remove)
     
@@ -645,12 +729,16 @@ class CircleSimulation:
         # Check circle collisions (which may generate new lines)
         for point in self.points:
             self.check_circle_collision(point)
-        
+
+        # Second pass: catch crossings with lines created during this frame
+        # Uses the same prev->curr motion, so continuous-time check remains valid
+        self.check_line_collisions()
+
         # Check point-to-point collisions
         for i in range(len(self.points)):
             for j in range(i + 1, len(self.points)):
                 self.check_point_collision(self.points[i], self.points[j])
-        
+
         # Remove points that have no remaining lines
         self.remove_points_without_lines()
     
