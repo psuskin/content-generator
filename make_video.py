@@ -28,7 +28,7 @@ def record_video(
     out_path: str | None = None,
     video_w: int = 1080,
     video_h: int = 1920,
-    sim_size: int = 1000,
+    sim_size: int = 1080,
 ):
     # Output path default
     day = sides - 2
@@ -70,6 +70,15 @@ def record_video(
     # Where to place the simulation on the 1080x1920 canvas
     sim_dest_x = (video_w - sim_size) // 2
     sim_dest_y = (video_h - sim_size) // 2
+
+    # Auto-scale: make the large n-gon take most of the simulation width.
+    # Then scale the small n-gon and speed by the same factor, and finally double the speed
+    # so generation finishes more quickly by default.
+    auto_large_width = int(sim_size * 0.96)
+    scale_factor = auto_large_width / 500.0  # reference was 500px
+    large_width = auto_large_width
+    small_width = int(round(small_width * scale_factor))
+    speed_used = speed * scale_factor * 1.0
 
     # State in closure to stop when finished
     state = {"finished": False, "tail": 0}
@@ -131,7 +140,7 @@ def record_video(
         sides=sides,
         large_width=large_width,
         small_width=small_width,
-        start_speed=speed,
+    start_speed=speed_used,
         window_size=(sim_size, sim_size),
         fps=sim_fps,
         frame_callback=on_frame,

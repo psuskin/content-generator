@@ -191,7 +191,7 @@ def run_simulation(
 	outline_pad_internal = 0.0
 
 	# --- Finish snapping: when nearly full size, snap to exact size and center for a clean climax ---
-	finish_snap_screen = 1.0  # px tolerance in screen space (size tolerance)
+	finish_snap_screen = 10.0  # px tolerance in screen space (slightly looser to avoid stalling)
 	finish_snap_internal = finish_snap_screen * render_scale
 	center_snap_screen = 1.0  # px tolerance in screen space (position tolerance)
 	center_snap_internal = center_snap_screen * render_scale
@@ -354,16 +354,19 @@ def run_simulation(
 				# Compute feasible target radius at current center
 				r_max_cur = compute_r_max(pos_x, pos_y)
 				target_r = min(R_large, r_max_cur)
-				# Desired increment based on previous scheme, but clamp by feasibility
-				remaining_screen = max(0.0, (R_large - r_small) / render_scale)  # in screen px (radius)
-				inc_screen = max(1.0, math.ceil(remaining_screen / 100.0))
-				inc_internal = inc_screen * render_scale  # width-like increment
-				# Convert increment to radius units and clamp to feasible margin
-				inc_radius = inc_internal / 2.0
+				# Compute remaining width (diameter) in screen pixels to keep units consistent
+				remaining_width_screen = max(0.0, (2.0 * R_large - 2.0 * r_small) / render_scale)
+				# Pace growth roughly proportional to remaining size (100 steps across the width)
+				inc_width_screen = max(1.0, math.ceil(remaining_width_screen / 100.0))
+				# Convert width increment (screen) to radius increment (internal)
+				inc_radius = (inc_width_screen * render_scale) * 0.5
 				inc_radius = min(inc_radius, max(0.0, target_r - r_small))
 				r_small += inc_radius
-				# Finish only when we're within size tolerance AND centered enough
-				if (R_large - r_small) <= finish_snap_internal and abs(pos_x - cx) <= center_snap_internal and abs(pos_y - cy) <= center_snap_internal:
+				# Finish: if size is within tolerance, snap to center and finalize
+				if (R_large - r_small) <= finish_snap_internal:
+					# Snap position to center to ensure exact fit
+					pos_x = float(cx)
+					pos_y = float(cy)
 					r_small = R_large
 					vel_x = 0.0
 					vel_y = 0.0
@@ -379,9 +382,11 @@ def run_simulation(
 		if collision_cooldown > 0:
 			collision_cooldown -= 1
 
-		# Finalization: only finish when truly at full size and centered
+		# Finalization: if size is within tolerance, snap to center and finish
 		if not finished:
-			if (R_large - r_small) <= finish_snap_internal and abs(pos_x - cx) <= center_snap_internal and abs(pos_y - cy) <= center_snap_internal:
+			if (R_large - r_small) <= finish_snap_internal:
+				pos_x = float(cx)
+				pos_y = float(cy)
 				r_small = R_large
 				vel_x = 0.0
 				vel_y = 0.0
