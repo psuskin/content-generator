@@ -152,6 +152,26 @@ def run_simulation(
 	# No extra shrink; we'll place clones so the outer outline touches the boundary exactly
 	outline_pad_internal = 0.0
 
+	# --- Finish snapping: when nearly full size, snap to exact size and center for a clean climax ---
+	finish_snap_screen = 1.0  # px tolerance in screen space (size tolerance)
+	finish_snap_internal = finish_snap_screen * render_scale
+	center_snap_screen = 1.0  # px tolerance in screen space (position tolerance)
+	center_snap_internal = center_snap_screen * render_scale
+
+	# Helper: maximum feasible radius at (x,y) without crossing any edge
+	def compute_r_max(x, y):
+		rmax = float('inf')
+		for idx, (e0, _e1, n_out) in enumerate(edges_pre):
+			nx, ny = n_out
+			d_center = (x - e0[0]) * nx + (y - e0[1]) * ny
+			s = support_dot_max_unit[idx]
+			if s <= 0:
+				continue
+			rmax_i = -d_center / s
+			if rmax_i < rmax:
+				rmax = rmax_i
+		return max(0.0, rmax)
+
 	# If already at or above target size, clamp and freeze
 	if r_small >= R_large:
 		r_small = R_large
@@ -269,24 +289,23 @@ def run_simulation(
 			if collisions_in_step > 0 and collision_cooldown == 0:
 				if clack_sound is not None:
 					clack_sound.play()
-				current_small_width = 2.0 * r_small  # internal px
-				target_width_internal = large_width * render_scale
-				remaining = max(0.0, target_width_internal - current_small_width)
-				if remaining <= 0.0:
+				# Compute feasible target radius at current center
+				r_max_cur = compute_r_max(pos_x, pos_y)
+				target_r = min(R_large, r_max_cur)
+				# Desired increment based on previous scheme, but clamp by feasibility
+				remaining_screen = max(0.0, (R_large - r_small) / render_scale)  # in screen px (radius)
+				inc_screen = max(1.0, math.ceil(remaining_screen / 100.0))
+				inc_internal = inc_screen * render_scale  # width-like increment
+				# Convert increment to radius units and clamp to feasible margin
+				inc_radius = inc_internal / 2.0
+				inc_radius = min(inc_radius, max(0.0, target_r - r_small))
+				r_small += inc_radius
+				# Finish only when we're within size tolerance AND centered enough
+				if (R_large - r_small) <= finish_snap_internal and abs(pos_x - cx) <= center_snap_internal and abs(pos_y - cy) <= center_snap_internal:
 					r_small = R_large
 					vel_x = 0.0
 					vel_y = 0.0
 					finished = True
-				else:
-					remaining_screen = remaining / render_scale
-					inc_screen = max(1.0, math.ceil(remaining_screen / 100.0))
-					inc_internal = min(inc_screen * render_scale, remaining)
-					r_small += inc_internal / 2.0
-					if r_small >= R_large:
-						r_small = R_large
-						vel_x = 0.0
-						vel_y = 0.0
-						finished = True
 				collision_cooldown = int(max(1, fps // 30))
 
 		# Build polygons (initial for collision checks)
@@ -298,12 +317,13 @@ def run_simulation(
 		if collision_cooldown > 0:
 			collision_cooldown -= 1
 
-		# Final clamp check independent of collisions
-		if not finished and 2.0 * r_small >= (large_width * render_scale):
-			r_small = R_large
-			vel_x = 0.0
-			vel_y = 0.0
-			finished = True
+		# Finalization: only finish when truly at full size and centered
+		if not finished:
+			if (R_large - r_small) <= finish_snap_internal and abs(pos_x - cx) <= center_snap_internal and abs(pos_y - cy) <= center_snap_internal:
+				r_small = R_large
+				vel_x = 0.0
+				vel_y = 0.0
+				finished = True
 
 		# Rebuild small polygon after any updates (for accurate drawing)
 		small_poly = build_small_poly(pos_x, pos_y, r_small)
