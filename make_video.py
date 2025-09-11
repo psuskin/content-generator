@@ -69,7 +69,9 @@ def record_video(
 
     # Where to place the simulation on the 1080x1920 canvas
     sim_dest_x = (video_w - sim_size) // 2
-    sim_dest_y = (video_h - sim_size) // 2
+    # Move the simulation (and title – which is positioned relative to sim_dest_y) down by the same offset
+    y_offset = 160  # px
+    sim_dest_y = (video_h - sim_size) // 2 + y_offset
 
     # Full-frame Matrix background (pure black base)
     bg_surface = pygame.Surface((video_w, video_h), pygame.SRCALPHA)
@@ -194,31 +196,72 @@ def record_video(
 
     writer.release()
 
-    # Optionally mux thock.mp3 at collision timestamps if ffmpeg is available
-    try:
-        import shutil, tempfile, subprocess
-        ffmpeg = shutil.which("ffmpeg")
-        if ffmpeg and os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "thock.mp3")) and collision_times:
-            workdir = tempfile.mkdtemp()
+    import shutil, tempfile, subprocess, wave
+    ffmpeg = shutil.which("ffmpeg")
+    thock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thock.mp3")
+    if ffmpeg and os.path.exists(thock_path) and collision_times:
+        # Work in a temp directory and convert click to a known PCM format
+        with tempfile.TemporaryDirectory() as workdir:
             click_wav = os.path.join(workdir, "click.wav")
-            # Convert thock.mp3 to wav for easy trimming/mixing
-            src_mp3 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thock.mp3")
-            subprocess.run([ffmpeg, "-y", "-i", src_mp3, click_wav], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # Build ffmpeg filter to mix clicks at timestamps
-            inputs = ["-i", out_path]
-            filters = []
-            amix_inputs = []
-            for idx, t in enumerate(collision_times[:2000]):  # cap to avoid extreme command sizes
-                inputs += ["-i", click_wav]
-                filters.append(f"[{idx+1}:a]adelay={int(max(0,t*1000))}|{int(max(0,t*1000))},volume=0.7[a{idx}]")
-                amix_inputs.append(f"[a{idx}]")
-            filter_complex = ";".join(filters) + f";{''.join(amix_inputs)}amix=inputs={len(amix_inputs)}:normalize=0[aout]"
+            # Force PCM s16le, 44.1kHz, stereo for consistent mixing
+            subprocess.run([ffmpeg, "-y", "-i", thock_path, "-ac", "2", "-ar", "44100", "-acodec", "pcm_s16le", click_wav], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Read click wav into numpy array
+            with wave.open(click_wav, "rb") as wf:
+                n_channels = wf.getnchannels()
+                sr = wf.getframerate()
+                sampwidth = wf.getsampwidth()
+                nframes = wf.getnframes()
+                click_bytes = wf.readframes(nframes)
+            if sampwidth != 2:
+                # Should not happen due to -acodec pcm_s16le
+                raise RuntimeError("Unexpected click WAV sample width; expected 16-bit")
+            click_arr = np.frombuffer(click_bytes, dtype=np.int16).reshape(-1, n_channels).astype(np.int32)
+
+            # Determine output audio length from rendered frames (plus a small tail)
+            duration_s = max(0.0, frame_counter / float(sim_fps))
+            total_samples = int(math.ceil((duration_s + 0.25) * sr))
+            total_samples = max(total_samples, click_arr.shape[0])
+
+            # Mix clicks into an int32 accumulator to avoid overflow during summation
+            mix_acc = np.zeros((total_samples, n_channels), dtype=np.int32)
+            # Apply gain similar to prior ffmpeg volume=0.7
+            gain = 0.7
+            click_scaled = (click_arr * gain).astype(np.int32)
+            clen = click_scaled.shape[0]
+            for t in collision_times:
+                start = int(t * sr)
+                if start >= total_samples:
+                    continue
+                end = min(total_samples, start + clen)
+                seg_len = end - start
+                if seg_len <= 0:
+                    continue
+                mix_acc[start:end, :] += click_scaled[:seg_len, :]
+
+            # Clip to int16 and write WAV
+            mix_int16 = np.clip(mix_acc, -32768, 32767).astype(np.int16)
+            mixed_wav = os.path.join(workdir, "mixed.wav")
+            with wave.open(mixed_wav, "wb") as wf:
+                wf.setnchannels(n_channels)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(mix_int16.tobytes())
+
+            # Mux into a new MP4 without re-encoding video; keep shortest
             out_mux = os.path.splitext(out_path)[0] + "_with_audio.mp4"
-            cmd = [ffmpeg, "-y", *inputs, "-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", out_mux]
+            cmd = [ffmpeg, "-y", "-i", out_path, "-i", mixed_wav, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-shortest", out_mux]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             out_path = out_mux
-    except Exception:
-        pass
+            print(f"Audio muxed: {len(collision_times)} clicks -> {out_path}")
+    else:
+        if not ffmpeg:
+            print("Skipping audio mux: ffmpeg not found in PATH")
+        elif not os.path.exists(thock_path):
+            print("Skipping audio mux: thock.mp3 not found next to script")
+        elif not collision_times:
+            print("Skipping audio mux: no collision timestamps recorded")
+            
     return out_path
 
 
