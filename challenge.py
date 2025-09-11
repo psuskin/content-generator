@@ -3,6 +3,7 @@ import argparse
 import pygame
 import os
 import colorsys
+import random
 
 
 def regular_polygon_vertices(n, center, radius, rotation=0.0):
@@ -76,6 +77,30 @@ def run_simulation(
 	# Persistent trail surface (draw once, then blit each frame onto canvas)
 	trail_surface = pygame.Surface(internal_size, pygame.SRCALPHA)
 	trail_surface.fill((0, 0, 0, 0))
+
+	# --- Matrix rain background setup ---
+	matrix_surface = pygame.Surface(internal_size, pygame.SRCALPHA)
+	matrix_surface.fill((0, 0, 0, 0))
+	# Smaller, subtler glyphs
+	matrix_font_size = max(6, int(8 * render_scale))
+	try:
+		matrix_font = pygame.font.SysFont("Consolas", matrix_font_size)
+	except Exception:
+		matrix_font = pygame.font.SysFont(None, matrix_font_size)
+	glyph_w, glyph_h = matrix_font.size("0")
+	n_cols = max(1, internal_size[0] // max(1, glyph_w))
+	matrix_chars = "01ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	# Pre-render glyphs for performance (bright head color, tails fade via surface fade)
+	# Dimmer green for subtle look
+	head_color = (100, 210, 100)
+	glyph_cache = {ch: matrix_font.render(ch, True, head_color) for ch in set(matrix_chars)}
+	# Column state
+	col_y = [random.uniform(-glyph_h * 20.0, 0.0) for _ in range(n_cols)]
+	# Slower drift for subtle motion
+	col_speed = [random.uniform(50.0 * render_scale, 120.0 * render_scale) for _ in range(n_cols)]
+	col_char = [random.choice(matrix_chars) for _ in range(n_cols)]
+	# Global low opacity for subtlety
+	matrix_surface.set_alpha(70)
 
 	# --- Audio setup: load external thock.wav from this script's directory ---
 	clack_sound = None
@@ -185,6 +210,26 @@ def run_simulation(
 		for event in pygame.event.get():
 			if event.type == pygame.QUIT:
 				running = False
+
+		# Update Matrix rain background
+		# Gentle fade of previous frame to create trails
+		# Stronger fade to keep trails faint
+		matrix_surface.fill((0, 0, 0, 64), special_flags=pygame.BLEND_RGBA_SUB)
+		for i in range(n_cols):
+			y_old = col_y[i]
+			col_y[i] += col_speed[i] * dt
+			y_new = col_y[i]
+			# Change char when stepping into a new row
+			if int(y_new / max(1, glyph_h)) != int(y_old / max(1, glyph_h)):
+				col_char[i] = random.choice(matrix_chars)
+			x = i * glyph_w
+			glyph = glyph_cache[col_char[i]]
+			matrix_surface.blit(glyph, (x, int(y_new)))
+			# Reset when off screen
+			if y_new > internal_size[1] + glyph_h * 6:
+				col_y[i] = random.uniform(-glyph_h * 20.0, 0.0)
+				col_speed[i] = random.uniform(50.0 * render_scale, 120.0 * render_scale)
+				col_char[i] = random.choice(matrix_chars)
 
 		# Integrate position with continuous-time collision resolution for straight trajectories
 		if not finished:
@@ -395,7 +440,9 @@ def run_simulation(
 
 		# Draw
 		# Draw into internal canvas
-		canvas.fill((15, 15, 18))
+		canvas.fill((10, 12, 10))
+		# Background: Matrix rain
+		canvas.blit(matrix_surface, (0, 0))
 		# Trail in background: blit accumulated surface (newer paint over older)
 		canvas.blit(trail_surface, (0, 0))
 
