@@ -60,59 +60,72 @@ def run_simulation(
 	start_speed=300.0,
 	window_size=(600, 600),
 	fps=120,
+	frame_callback=None,
+	headless=False,
+	render_scale_override=None,
+	enable_matrix=True,
 ):
+	# Optional headless mode for offline rendering without opening a window
+	if headless:
+		# Use dummy video driver so pygame doesn't try to open a window
+		os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 	pygame.init()
 	# Display scale: show more pixels while keeping proportions
 	display_scale = 1.0
 	screen_size = (int(window_size[0] * display_scale), int(window_size[1] * display_scale))
-	screen = pygame.display.set_mode(screen_size)
-	pygame.display.set_caption("n-gon in n-gon — elastic growth sim")
+	screen = None
+	if not headless:
+		screen = pygame.display.set_mode(screen_size)
+		pygame.display.set_caption("n-gon in n-gon — elastic growth sim")
 	clock = pygame.time.Clock()
 	font = pygame.font.SysFont(None, 24)
 
 	# --- Rendering scale (supersampling for sharper image) ---
-	render_scale = 3.0  # internal rendering at 3x, then smooth downscale
+	render_scale = float(render_scale_override) if render_scale_override else 3.0  # allow override in headless
 	internal_size = (int(window_size[0] * render_scale), int(window_size[1] * render_scale))
 	canvas = pygame.Surface(internal_size)  # opaque draw target
 	# Persistent trail surface (draw once, then blit each frame onto canvas)
 	trail_surface = pygame.Surface(internal_size, pygame.SRCALPHA)
 	trail_surface.fill((0, 0, 0, 0))
 
-	# --- Matrix rain background setup ---
-	matrix_surface = pygame.Surface(internal_size, pygame.SRCALPHA)
-	matrix_surface.fill((0, 0, 0, 0))
-	# Smaller, subtler glyphs
-	matrix_font_size = max(6, int(8 * render_scale))
-	try:
-		matrix_font = pygame.font.SysFont("Consolas", matrix_font_size)
-	except Exception:
-		matrix_font = pygame.font.SysFont(None, matrix_font_size)
-	glyph_w, glyph_h = matrix_font.size("0")
-	n_cols = max(1, internal_size[0] // max(1, glyph_w))
-	matrix_chars = "01ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	# Pre-render glyphs for performance (bright head color, tails fade via surface fade)
-	# Dimmer green for subtle look
-	head_color = (100, 210, 100)
-	glyph_cache = {ch: matrix_font.render(ch, True, head_color) for ch in set(matrix_chars)}
-	# Column state
-	col_y = [random.uniform(-glyph_h * 20.0, 0.0) for _ in range(n_cols)]
-	# Slower drift for subtle motion
-	col_speed = [random.uniform(50.0 * render_scale, 120.0 * render_scale) for _ in range(n_cols)]
-	col_char = [random.choice(matrix_chars) for _ in range(n_cols)]
-	# Global low opacity for subtlety
-	matrix_surface.set_alpha(70)
+	# --- Matrix rain background setup (optional) ---
+	matrix_surface = None
+	if enable_matrix:
+		matrix_surface = pygame.Surface(internal_size, pygame.SRCALPHA)
+		matrix_surface.fill((0, 0, 0, 0))
+		# Smaller, subtler glyphs
+		matrix_font_size = max(6, int(8 * render_scale))
+		try:
+			matrix_font = pygame.font.SysFont("Consolas", matrix_font_size)
+		except Exception:
+			matrix_font = pygame.font.SysFont(None, matrix_font_size)
+		glyph_w, glyph_h = matrix_font.size("0")
+		n_cols = max(1, internal_size[0] // max(1, glyph_w))
+		matrix_chars = "01ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		# Pre-render glyphs for performance (bright head color, tails fade via surface fade)
+		# Dimmer green for subtle look
+		head_color = (100, 210, 100)
+		glyph_cache = {ch: matrix_font.render(ch, True, head_color) for ch in set(matrix_chars)}
+		# Column state
+		col_y = [random.uniform(-glyph_h * 20.0, 0.0) for _ in range(n_cols)]
+		# Slower drift for subtle motion
+		col_speed = [random.uniform(50.0 * render_scale, 120.0 * render_scale) for _ in range(n_cols)]
+		col_char = [random.choice(matrix_chars) for _ in range(n_cols)]
+		# Global low opacity for subtlety
+		matrix_surface.set_alpha(70)
 
-	# --- Audio setup: load external thock.wav from this script's directory ---
+	# --- Audio setup (skip in headless) ---
 	clack_sound = None
-	try:
-		pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
-		script_dir = os.path.dirname(os.path.abspath(__file__))
-		sound_path = os.path.join(script_dir, "thock.mp3")
-		clack_sound = pygame.mixer.Sound(sound_path)
-		# Optional: adjust volume slightly if needed
-		clack_sound.set_volume(0.6)
-	except Exception:
-		clack_sound = None
+	if not headless:
+		try:
+			pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
+			script_dir = os.path.dirname(os.path.abspath(__file__))
+			sound_path = os.path.join(script_dir, "thock.mp3")
+			clack_sound = pygame.mixer.Sound(sound_path)
+			# Optional: adjust volume slightly if needed
+			clack_sound.set_volume(0.6)
+		except Exception:
+			clack_sound = None
 
 	cx, cy = internal_size[0] // 2, internal_size[1] // 2
 
@@ -205,31 +218,35 @@ def run_simulation(
 		finished = True
 
 	while running:
-		dt = clock.tick(fps) / 1000.0
+		# Fixed dt in headless mode for deterministic, smooth offline rendering
+		if headless:
+			dt = 1.0 / float(fps)
+		else:
+			dt = clock.tick(fps) / 1000.0
 
 		for event in pygame.event.get():
 			if event.type == pygame.QUIT:
 				running = False
 
-		# Update Matrix rain background
-		# Gentle fade of previous frame to create trails
-		# Stronger fade to keep trails faint
-		matrix_surface.fill((0, 0, 0, 64), special_flags=pygame.BLEND_RGBA_SUB)
-		for i in range(n_cols):
-			y_old = col_y[i]
-			col_y[i] += col_speed[i] * dt
-			y_new = col_y[i]
-			# Change char when stepping into a new row
-			if int(y_new / max(1, glyph_h)) != int(y_old / max(1, glyph_h)):
-				col_char[i] = random.choice(matrix_chars)
-			x = i * glyph_w
-			glyph = glyph_cache[col_char[i]]
-			matrix_surface.blit(glyph, (x, int(y_new)))
-			# Reset when off screen
-			if y_new > internal_size[1] + glyph_h * 6:
-				col_y[i] = random.uniform(-glyph_h * 20.0, 0.0)
-				col_speed[i] = random.uniform(50.0 * render_scale, 120.0 * render_scale)
-				col_char[i] = random.choice(matrix_chars)
+		# Update Matrix rain background (if enabled)
+		if enable_matrix and matrix_surface is not None:
+			# Gentle fade of previous frame to create trails
+			matrix_surface.fill((0, 0, 0, 64), special_flags=pygame.BLEND_RGBA_SUB)
+			for i in range(n_cols):
+				y_old = col_y[i]
+				col_y[i] += col_speed[i] * dt
+				y_new = col_y[i]
+				# Change char when stepping into a new row
+				if int(y_new / max(1, glyph_h)) != int(y_old / max(1, glyph_h)):
+					col_char[i] = random.choice(matrix_chars)
+				x = i * glyph_w
+				glyph = glyph_cache[col_char[i]]
+				matrix_surface.blit(glyph, (x, int(y_new)))
+				# Reset when off screen
+				if y_new > internal_size[1] + glyph_h * 6:
+					col_y[i] = random.uniform(-glyph_h * 20.0, 0.0)
+					col_speed[i] = random.uniform(50.0 * render_scale, 120.0 * render_scale)
+					col_char[i] = random.choice(matrix_chars)
 
 		# Integrate position with continuous-time collision resolution for straight trajectories
 		if not finished:
@@ -442,7 +459,8 @@ def run_simulation(
 		# Draw into internal canvas
 		canvas.fill((10, 12, 10))
 		# Background: Matrix rain
-		canvas.blit(matrix_surface, (0, 0))
+		if enable_matrix and matrix_surface is not None:
+			canvas.blit(matrix_surface, (0, 0))
 		# Trail in background: blit accumulated surface (newer paint over older)
 		canvas.blit(trail_surface, (0, 0))
 
@@ -453,23 +471,29 @@ def run_simulation(
 		small_verts_draw = [(int(round(x)), int(round(y))) for x, y in small_poly]
 		pygame.draw.polygon(canvas, (255, 255, 255), small_verts_draw)
 
-		# Scale down to screen with smoothing for crisp edges
-		scaled = pygame.transform.smoothscale(canvas, screen_size)
-		screen.blit(scaled, (0, 0))
+		# Invoke frame callback before presenting, passing current widths in screen px
+		if frame_callback is not None:
+			current_small_px = 2 * r_small / render_scale
+			current_large_px = 2 * R_large / render_scale
+			# Provide the canvas surface; callback may copy/scale as needed
+			frame_callback(canvas, current_small_px, current_large_px)
 
-		# HUD text (draw after scaling to keep text size consistent)
-		hud = [
-			f"sides: {sides}",
-			f"small width: {2*r_small/render_scale:.1f}px",
-			f"speed: {math.hypot(vel_x, vel_y)/render_scale:.1f}px/s",
-		]
-		y = 10
-		for line in hud:
-			surf = font.render(line, True, (240, 240, 245))
-			screen.blit(surf, (10, y))
-			y += 18
-
-		pygame.display.flip()
+		# Present only if not headless
+		if not headless and screen is not None:
+			scaled = pygame.transform.smoothscale(canvas, screen_size)
+			screen.blit(scaled, (0, 0))
+			# HUD text (draw after scaling to keep text size consistent)
+			hud = [
+				f"sides: {sides}",
+				f"small width: {2*r_small/render_scale:.1f}px",
+				f"speed: {math.hypot(vel_x, vel_y)/render_scale:.1f}px/s",
+			]
+			y = 10
+			for line in hud:
+				surf = font.render(line, True, (240, 240, 245))
+				screen.blit(surf, (10, y))
+				y += 18
+			pygame.display.flip()
 
 	pygame.quit()
 
