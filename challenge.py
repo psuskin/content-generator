@@ -64,6 +64,7 @@ def run_simulation(
 	headless=False,
 	render_scale_override=None,
 	enable_matrix=True,
+	collision_callback=None,
 ):
 	# Optional headless mode for offline rendering without opening a window
 	if headless:
@@ -132,6 +133,9 @@ def run_simulation(
 	# Interpret width as 2 * circumradius (scale to internal pixels)
 	R_large = (large_width / 2.0) * render_scale
 	r_small = (small_width / 2.0) * render_scale
+
+	# Track elapsed simulated time for event callbacks
+	elapsed_s = 0.0
 
 	# Orientation: point a vertex upward (rotation = -pi/2)
 	rotation = -math.pi / 2.0
@@ -223,6 +227,9 @@ def run_simulation(
 			dt = 1.0 / float(fps)
 		else:
 			dt = clock.tick(fps) / 1000.0
+
+		# Track elapsed simulated time
+		elapsed_s += dt
 
 		for event in pygame.event.get():
 			if event.type == pygame.QUIT:
@@ -351,6 +358,12 @@ def run_simulation(
 			if collisions_in_step > 0 and collision_cooldown == 0:
 				if clack_sound is not None:
 					clack_sound.play()
+				# External collision event callback (e.g., audio schedule)
+				if collision_callback is not None:
+					try:
+						collision_callback(elapsed_s)
+					except Exception:
+						pass
 				# Compute feasible target radius at current center
 				r_max_cur = compute_r_max(pos_x, pos_y)
 				target_r = min(R_large, r_max_cur)
@@ -461,8 +474,8 @@ def run_simulation(
 				last_trail_r = r_small
 
 		# Draw
-		# Draw into internal canvas
-		canvas.fill((10, 12, 10))
+		# Draw into internal canvas (pure black background)
+		canvas.fill((0, 0, 0))
 		# Background: Matrix rain
 		if enable_matrix and matrix_surface is not None:
 			canvas.blit(matrix_surface, (0, 0))
