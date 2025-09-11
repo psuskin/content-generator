@@ -69,8 +69,8 @@ def record_video(
 
     # Where to place the simulation on the 1080x1920 canvas
     sim_dest_x = (video_w - sim_size) // 2
-    # Move the simulation (and title – which is positioned relative to sim_dest_y) down by the same offset
-    y_offset = 160  # px
+    # Move the simulation (and title – which is positioned relative to sim_dest_y) further down
+    y_offset = 260  # px
     sim_dest_y = (video_h - sim_size) // 2 + y_offset
 
     # Full-frame Matrix background (pure black base)
@@ -81,15 +81,24 @@ def record_video(
     except Exception:
         bg_font = pygame.font.SysFont(None, 22)
     glyph_w_bg, glyph_h_bg = bg_font.size("0")
-    n_cols_bg = max(1, video_w // max(1, glyph_w_bg))
+    # Sparse columns: one per glyph width
+    col_step = max(1, glyph_w_bg)
+    n_cols_bg = max(1, video_w // col_step)
     matrix_chars = "01ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     head_color = (100, 210, 100)
     glyph_cache_bg = {ch: bg_font.render(ch, True, head_color) for ch in set(matrix_chars)}
     import random
-    col_y_bg = [random.uniform(-glyph_h_bg * 20.0, 0.0) for _ in range(n_cols_bg)]
-    col_speed_bg = [random.uniform(90.0, 180.0) for _ in range(n_cols_bg)]
-    col_char_bg = [random.choice(matrix_chars) for _ in range(n_cols_bg)]
-    bg_surface.set_alpha(80)
+    col_x_bg = [i * col_step for i in range(n_cols_bg)]
+    # Single head per column, staggered starts for steady, low density
+    col_y = [random.uniform(-glyph_h_bg * 20.0, 0.0) for _ in range(n_cols_bg)]
+    # Randomize speed per column for organic motion
+    col_speed_bg = [random.uniform(140.0, 220.0) for _ in range(n_cols_bg)]
+    bg_surface.set_alpha(70)
+    # Multi-head per column for smooth, constant flow
+    N_HEADS = 2
+    heads_y = [[random.uniform(-video_h * 1.2, video_h * 0.2) for _ in range(n_cols_bg)] for _ in range(N_HEADS)]
+    heads_char = [[random.choice(matrix_chars) for _ in range(n_cols_bg)] for _ in range(N_HEADS)]
+    heads_speed = [[random.uniform(140.0, 220.0) for _ in range(n_cols_bg)] for _ in range(N_HEADS)]
 
     # Collect collision timestamps to later add audio clicks
     collision_times = []
@@ -113,33 +122,37 @@ def record_video(
         frame_surface.fill((0, 0, 0))  # pure black background
         # Update background animation
         dt_bg = 1.0 / float(sim_fps)
-        bg_surface.fill((0, 0, 0, 64), special_flags=pygame.BLEND_RGBA_SUB)
+        # Fade previous frame slightly to create smooth trails
+        bg_surface.fill((0, 0, 0, 56), special_flags=pygame.BLEND_RGBA_SUB)
         for i in range(n_cols_bg):
-            y_old = col_y_bg[i]
-            col_y_bg[i] += col_speed_bg[i] * dt_bg
-            y_new = col_y_bg[i]
-            if int(y_new / max(1, glyph_h_bg)) != int(y_old / max(1, glyph_h_bg)):
-                col_char_bg[i] = random.choice(matrix_chars)
-            x = i * glyph_w_bg
-            glyph = glyph_cache_bg[col_char_bg[i]]
-            bg_surface.blit(glyph, (x, int(y_new)))
-            if y_new > video_h + glyph_h_bg * 6:
-                col_y_bg[i] = random.uniform(-glyph_h_bg * 20.0, 0.0)
-                col_speed_bg[i] = random.uniform(90.0, 180.0)
-                col_char_bg[i] = random.choice(matrix_chars)
-        frame_surface.blit(bg_surface, (0, 0))
+            x = col_x_bg[i]
+            for h in range(N_HEADS):
+                y_old = heads_y[h][i]
+                spd = heads_speed[h][i]
+                y_new = y_old + spd * dt_bg
+                # Change char on row crossing for subtle randomness
+                if int(y_new / max(1, glyph_h_bg)) != int(y_old / max(1, glyph_h_bg)):
+                    heads_char[h][i] = random.choice(matrix_chars)
+                # Wrap to above the screen when off the bottom
+                if y_new > video_h + glyph_h_bg * 2:
+                    y_new = random.uniform(-video_h * 0.8, -glyph_h_bg * 5.0)
+                    # Slight speed jitter on reset to avoid sync
+                    heads_speed[h][i] = random.uniform(140.0, 220.0)
+                glyph = glyph_cache_bg[heads_char[h][i]]
+                bg_surface.blit(glyph, (x, int(y_new)))
+                heads_y[h][i] = y_new
         # Scale simulation canvas to target sim_size (square) and center
         sim_scaled = pygame.transform.smoothscale(canvas, (sim_size, sim_size))
         frame_surface.blit(sim_scaled, (sim_dest_x, sim_dest_y))
 
-        # Top title (Comic Sans), centered above simulation (raised a bit)
+        # Top title (Comic Sans), centered above simulation (slightly higher)
         render_multiline_center(
             frame_surface,
             title_lines,
             title_font,
             (255, 255, 255),
             center_x=video_w // 2,
-            top_y=max(40, sim_dest_y - 320),
+            top_y=max(40, sim_dest_y - 340),
             line_spacing=8,
         )
 
@@ -149,8 +162,43 @@ def record_video(
         info_text = f"{small_rounded}px / {large_int}px"
         info_surf = info_font.render(info_text, True, (255, 255, 255))
         info_rect = info_surf.get_rect()
-        info_rect.midtop = (video_w // 2, sim_dest_y + sim_size + 20)
+        # Move bottom text slightly down
+        info_rect.midtop = (video_w // 2, sim_dest_y + sim_size - 250)
         frame_surface.blit(info_surf, info_rect)
+
+        # Compute large polygon (screen space) for masking and outline
+        R_screen = current_large_px * 0.5
+        cx_screen = sim_dest_x + (sim_size / 2.0)
+        cy_screen = sim_dest_y + (sim_size / 2.0)
+        rot = -math.pi / 2.0
+        verts = [
+            (
+                cx_screen + R_screen * math.cos(rot + 2.0 * math.pi * i / sides),
+                cy_screen + R_screen * math.sin(rot + 2.0 * math.pi * i / sides),
+            )
+            for i in range(sides)
+        ]
+        if verts:
+            y_max_f = max(y for (_, y) in verts)
+            y_max_row = int(round(y_max_f))
+            flat_tol = 0.75
+            verts_draw = []
+            for x, y in verts:
+                rx = int(round(x))
+                ry = y_max_row if abs(y - y_max_f) < flat_tol else int(round(y))
+                verts_draw.append((rx, ry))
+
+            # Bring code stream to the foreground BUT punch a hole inside the large n-gon
+            code_outside = bg_surface.copy()
+            hole = pygame.Surface((video_w, video_h), pygame.SRCALPHA)
+            # Alpha-only subtraction to clear the code inside polygon
+            pygame.draw.polygon(hole, (0, 0, 0, 255), verts_draw)
+            code_outside.blit(hole, (0, 0), special_flags=pygame.BLEND_RGBA_SUB)
+            frame_surface.blit(code_outside, (0, 0))
+
+            # Redraw large n-gon outline on top so it stays above the code stream
+            outline_w = 6
+            pygame.draw.polygon(frame_surface, (200, 200, 220), verts_draw, width=outline_w)
 
         # Convert surface to bytes (RGB) efficiently and write via OpenCV
         raw = pygame.image.tostring(frame_surface, "RGB")
