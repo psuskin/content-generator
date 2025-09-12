@@ -66,12 +66,21 @@ def record_video(
         "Adding one side each",
         "day until it's a circle",
     ]
+    # Pre-measure title block height for layout calculations
+    title_line_spacing = 8
+    title_block_height = 0
+    if title_lines:
+        heights = [title_font.size(line)[1] for line in title_lines]
+        title_block_height = sum(heights) + title_line_spacing * (len(title_lines) - 1)
 
     # Where to place the simulation on the 1080x1920 canvas
     sim_dest_x = (video_w - sim_size) // 2
     # Move the simulation (and title – which is positioned relative to sim_dest_y) further down
+    # Keep this as baseline for text positions
     y_offset = 260  # px
     sim_dest_y = (video_h - sim_size) // 2 + y_offset
+    # Apply an additional visual shift only to the rendered n-gon (and its mask/outline)
+    sim_visual_shift_y = -160  # move the n-gon slightly higher without affecting text positions
 
     # Full-frame Matrix background (pure black base)
     bg_surface = pygame.Surface((video_w, video_h), pygame.SRCALPHA)
@@ -110,7 +119,14 @@ def record_video(
     scale_factor = auto_large_width / 500.0  # reference was 500px
     large_width = auto_large_width
     small_width = int(round(small_width * scale_factor))
-    speed_used = speed * scale_factor * 1.0
+    # Consistent proportional boost as sides increase (linear, gentle).
+    # Tunables chosen to keep durations roughly consistent without extremes.
+    base_boost = 1.55   # overall baseline speed-up
+    slope_per_side = 0.010  # +1% per added side above 3
+    speed_mult = base_boost + slope_per_side * max(0, (sides - 3))
+    # Clamp to avoid runaway at very large n
+    speed_mult = min(speed_mult, 2.0)
+    speed_used = speed * scale_factor * speed_mult
 
     # State in closure to stop when finished
     state = {"finished": False, "tail": 0}
@@ -118,6 +134,7 @@ def record_video(
     frame_counter = 0
 
     def on_frame(canvas: pygame.Surface, current_small_px: float, current_large_px: float):
+        nonlocal frame_counter
         # Compose final frame
         frame_surface.fill((0, 0, 0))  # pure black background
         # Update background animation
@@ -143,17 +160,48 @@ def record_video(
                 heads_y[h][i] = y_new
         # Scale simulation canvas to target sim_size (square) and center
         sim_scaled = pygame.transform.smoothscale(canvas, (sim_size, sim_size))
-        frame_surface.blit(sim_scaled, (sim_dest_x, sim_dest_y))
+        frame_surface.blit(sim_scaled, (sim_dest_x, sim_dest_y + sim_visual_shift_y))
 
-        # Top title (Comic Sans), centered above simulation (slightly higher)
+        # Compute large polygon (screen space) for masking/outline and title offset measurement
+        R_screen = current_large_px * 0.5
+        cx_screen = sim_dest_x + (sim_size / 2.0)
+        cy_screen = sim_dest_y + sim_visual_shift_y + (sim_size / 2.0)
+        # Match simulation orientation: flat edge at the bottom
+        rot = (-math.pi / 2.0) if (sides % 2 == 1) else (-math.pi / 2.0 + math.pi / sides)
+        verts = [
+            (
+                cx_screen + R_screen * math.cos(rot + 2.0 * math.pi * i / sides),
+                cy_screen + R_screen * math.sin(rot + 2.0 * math.pi * i / sides),
+            )
+            for i in range(sides)
+        ]
+        # Original approach: compare polygon's top to a reference triangle
+        tri_rot = -math.pi / 2.0
+        verts_ref = [
+            (
+                cx_screen + R_screen * math.cos(tri_rot + 2.0 * math.pi * i / 3),
+                cy_screen + R_screen * math.sin(tri_rot + 2.0 * math.pi * i / 3),
+            )
+            for i in range(3)
+        ]
+        y_top_cur = min(y for (_, y) in verts) if verts else sim_dest_y
+        y_top_ref = min(y for (_, y) in verts_ref)
+        delta_top = y_top_ref - y_top_cur  # positive if current polygon top is higher
+        title_top_from_triangle = max(40, (sim_dest_y - 320) - int(round(delta_top)))
+        # Also enforce a clear margin above the actual polygon top (slightly reduced)
+        title_margin = 120
+        desired_top_from_poly = int(round(y_top_cur)) - title_margin - title_block_height
+        title_top_y = min(title_top_from_triangle, max(40, desired_top_from_poly))
+
+        # Top title (Comic Sans), centered above simulation with dynamic upward shift
         render_multiline_center(
             frame_surface,
             title_lines,
             title_font,
             (255, 255, 255),
             center_x=video_w // 2,
-            top_y=max(40, sim_dest_y - 340),
-            line_spacing=8,
+            top_y=title_top_y,
+            line_spacing=title_line_spacing,
         )
 
         # Bottom info: current smaller px (rounded) / larger px (int)
@@ -162,22 +210,20 @@ def record_video(
         info_text = f"{small_rounded}px / {large_int}px"
         info_surf = info_font.render(info_text, True, (255, 255, 255))
         info_rect = info_surf.get_rect()
-        # Move bottom text slightly down
-        info_rect.midtop = (video_w // 2, sim_dest_y + sim_size - 250)
+        # Place bottom text safely under the polygon bottom with a fixed margin
+        if verts:
+            y_bottom_poly = max(y for (_, y) in verts)
+        else:
+            y_bottom_poly = sim_dest_y + sim_size  # fallback
+        safe_margin = 90
+        proposed_top = int(round(y_bottom_poly)) + safe_margin
+        # Keep within the frame: leave some bottom padding
+        bottom_padding = 80
+        max_top = video_h - bottom_padding - info_rect.height
+        info_rect.midtop = (video_w // 2, min(proposed_top, max_top))
         frame_surface.blit(info_surf, info_rect)
 
-        # Compute large polygon (screen space) for masking and outline
-        R_screen = current_large_px * 0.5
-        cx_screen = sim_dest_x + (sim_size / 2.0)
-        cy_screen = sim_dest_y + (sim_size / 2.0)
-        rot = -math.pi / 2.0
-        verts = [
-            (
-                cx_screen + R_screen * math.cos(rot + 2.0 * math.pi * i / sides),
-                cy_screen + R_screen * math.sin(rot + 2.0 * math.pi * i / sides),
-            )
-            for i in range(sides)
-        ]
+        # verts already computed above; build integer draw vertices with flattened bottom row
         if verts:
             y_max_f = max(y for (_, y) in verts)
             y_max_row = int(round(y_max_f))
@@ -208,7 +254,6 @@ def record_video(
         writer.write(frame_bgr)
 
         # Lightweight progress every ~2 seconds
-        nonlocal frame_counter
         frame_counter += 1
         if frame_counter % max(1, (sim_fps * 2)) == 0:
             print(f"Rendered {frame_counter} frames (~{frame_counter/sim_fps:.1f}s)")
@@ -322,22 +367,43 @@ def main():
     parser.add_argument("--speed", type=float, default=300.0, help="Initial speed to the right in px/s")
     parser.add_argument("--fps", type=int, default=120, help="Video and simulation FPS (high-fps recommended)")
     parser.add_argument("--out", type=str, default=None, help="Output MP4 path (default: day_{sides-2}.mp4)")
+    parser.add_argument("--loop", action="store_true", help="If set, keep rendering videos, incrementing --sides forever.")
     args = parser.parse_args()
 
-    sides = max(3, args.sides)
-    pygame.init()
-    try:
-        out_path = record_video(
-            sides=sides,
-            large_width=args.large,
-            small_width=args.small,
-            speed=args.speed,
-            sim_fps=args.fps,
-            out_path=args.out,
-        )
-        print(f"Saved: {out_path}")
-    finally:
-        pygame.quit()
+    start_sides = max(3, args.sides)
+    if not args.loop:
+        pygame.init()
+        try:
+            out_path = record_video(
+                sides=start_sides,
+                large_width=args.large,
+                small_width=args.small,
+                speed=args.speed,
+                sim_fps=args.fps,
+                out_path=args.out,
+            )
+            print(f"Saved: {out_path}")
+        finally:
+            pygame.quit()
+    else:
+        # Loop forever, increasing side count each iteration
+        current = start_sides
+        while True:
+            print(f"\n=== Rendering sides={current} ===")
+            pygame.init()
+            try:
+                out_path = record_video(
+                    sides=current,
+                    large_width=args.large,
+                    small_width=args.small,
+                    speed=args.speed,
+                    sim_fps=args.fps,
+                    out_path=args.out,
+                )
+                print(f"Saved: {out_path}")
+            finally:
+                pygame.quit()
+            current += 1
 
 
 if __name__ == "__main__":

@@ -137,8 +137,9 @@ def run_simulation(
 	# Track elapsed simulated time for event callbacks
 	elapsed_s = 0.0
 
-	# Orientation: point a vertex upward (rotation = -pi/2)
-	rotation = -math.pi / 2.0
+	# Orientation: ensure a flat edge at the bottom.
+	# Odd n: vertex up keeps a flat bottom edge; Even n: rotate by +pi/n so bottom is a flat side.
+	rotation = (-math.pi / 2.0) if (sides % 2 == 1) else (-math.pi / 2.0 + math.pi / sides)
 
 	# Precompute unit polygon offsets and large polygon geometry
 	unit_offsets = [
@@ -354,37 +355,37 @@ def run_simulation(
 				collisions_in_step += 1
 				if t_remaining <= 0.0:
 					break
-			# Growth and sound once per frame on first collision cluster
-			if collisions_in_step > 0 and collision_cooldown == 0:
-				if clack_sound is not None:
-					clack_sound.play()
-				# External collision event callback (e.g., audio schedule)
-				if collision_callback is not None:
-					try:
-						collision_callback(elapsed_s)
-					except Exception:
-						pass
-				# Compute feasible target radius at current center
-				r_max_cur = compute_r_max(pos_x, pos_y)
-				target_r = min(R_large, r_max_cur)
-				# Compute remaining width (diameter) in screen pixels to keep units consistent
-				remaining_width_screen = max(0.0, (2.0 * R_large - 2.0 * r_small) / render_scale)
-				# Pace growth roughly proportional to remaining size (100 steps across the width)
-				inc_width_screen = max(1.0, math.ceil(remaining_width_screen / 100.0))
-				# Convert width increment (screen) to radius increment (internal)
-				inc_radius = (inc_width_screen * render_scale) * 0.5
-				inc_radius = min(inc_radius, max(0.0, target_r - r_small))
-				r_small += inc_radius
-				# Finish: if size is within tolerance, snap to center and finalize
-				if (R_large - r_small) <= finish_snap_internal:
-					# Snap position to center to ensure exact fit
-					pos_x = float(cx)
-					pos_y = float(cy)
-					r_small = R_large
-					vel_x = 0.0
-					vel_y = 0.0
-					finished = True
-				collision_cooldown = int(max(1, fps // 30))
+				# Growth happens per collision: increase by (remaining_width/100) for each hit in this frame
+				if collisions_in_step > 0:
+					# Remaining diameter in screen px
+					remaining_width_screen = max(0.0, (2.0 * R_large - 2.0 * r_small) / render_scale)
+					# Per-collision increment in width (screen px)
+					per_collision_width = remaining_width_screen / 100.0
+					# Total increment this frame proportional to number of collisions in swept step
+					total_inc_width_screen = per_collision_width * collisions_in_step
+					# Convert width increment (screen) to radius increment (internal px)
+					inc_radius = (total_inc_width_screen * render_scale) * 0.5
+					# Do not exceed the final target size; use global R_large, not local geometry cap
+					inc_radius = min(inc_radius, max(0.0, R_large - r_small))
+					r_small += inc_radius
+					# Finish: if size is within tolerance, snap to center and finalize
+					if (R_large - r_small) <= finish_snap_internal:
+						pos_x = float(cx)
+						pos_y = float(cy)
+						r_small = R_large
+						vel_x = 0.0
+						vel_y = 0.0
+						finished = True
+				# Sound/callback throttled to avoid spamming audio; still signal on hit clusters
+				if collisions_in_step > 0 and collision_cooldown == 0:
+					if clack_sound is not None:
+						clack_sound.play()
+					if collision_callback is not None:
+						try:
+							collision_callback(elapsed_s)
+						except Exception:
+							pass
+					collision_cooldown = int(max(1, fps // 30))
 
 		# Build polygons (initial for collision checks)
 		def build_small_poly(xc, yc, rad):
