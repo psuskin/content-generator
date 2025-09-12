@@ -121,7 +121,7 @@ def run_simulation(
 		try:
 			pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
 			script_dir = os.path.dirname(os.path.abspath(__file__))
-			sound_path = os.path.join(script_dir, "thock.mp3")
+			sound_path = os.path.join(script_dir, "thock.wav")
 			clack_sound = pygame.mixer.Sound(sound_path)
 			# Optional: adjust volume slightly if needed
 			clack_sound.set_volume(0.6)

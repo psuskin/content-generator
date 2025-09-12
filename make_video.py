@@ -216,7 +216,8 @@ def record_video(
         # Stop condition: when small reaches (or exceeds) large
         if not state["finished"] and small_rounded >= large_int:
             state["finished"] = True
-            state["tail"] = 6  # write a few extra frames for a clean ending
+            # Render an extra 3 seconds to let the moment land
+            state["tail"] = int(sim_fps * 3)
         elif state["finished"]:
             state["tail"] -= 1
             if state["tail"] <= 0:
@@ -246,7 +247,7 @@ def record_video(
 
     import shutil, tempfile, subprocess, wave
     ffmpeg = shutil.which("ffmpeg")
-    thock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thock.mp3")
+    thock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thock.wav")
     if ffmpeg and os.path.exists(thock_path) and collision_times:
         # Work in a temp directory and convert click to a known PCM format
         with tempfile.TemporaryDirectory() as workdir:
@@ -306,7 +307,7 @@ def record_video(
         if not ffmpeg:
             print("Skipping audio mux: ffmpeg not found in PATH")
         elif not os.path.exists(thock_path):
-            print("Skipping audio mux: thock.mp3 not found next to script")
+            print("Skipping audio mux: thock.wav not found next to script")
         elif not collision_times:
             print("Skipping audio mux: no collision timestamps recorded")
             
