@@ -100,6 +100,7 @@ class Line:
         self.color = color  # Same color as the point
         self.active = True  # Whether the line is still active
         self.dashed = False  # Whether the line is dashed (hit once)
+        self.dash_alt_color = None  # Alternate color once dashed (color of crossing point)
         
         # Simple collision tracking - just track which points have been near this line
         self.collision_cooldown = {}  # point_id -> frames_remaining
@@ -655,6 +656,15 @@ class CircleSimulation:
                     line.active = False
                     lines_to_remove.append(line_id)
                 elif total_hits == 1:
+                    # Become dashed and remember the crossing point's color for alternating dashes
+                    # Pick the point that contributed the hit
+                    hit_point_id = next((pid for pid, cnt in by_point.items() if cnt > 0), None)
+                    if hit_point_id is not None:
+                        # Find the point to capture its color
+                        for p in self.points:
+                            if p.id == hit_point_id:
+                                line.dash_alt_color = p.color
+                                break
                     line.dashed = True
             else:
                 if total_hits >= 1:
@@ -941,8 +951,8 @@ class CircleSimulation:
                 
                 # Choose line style based on state
                 if line.dashed:
-                    # Draw dashed line
-                    self._draw_dashed_line(line.color, start_pos, end_pos, config.LINE_WIDTH)
+                    # Draw dashed line alternating between base color and crossing color
+                    self._draw_dashed_line(line.color, start_pos, end_pos, config.LINE_WIDTH, alt_color=line.dash_alt_color)
                 else:
                     # Draw solid line
                     pygame.draw.line(self.screen, line.color, start_pos, end_pos, config.LINE_WIDTH)
@@ -951,8 +961,9 @@ class CircleSimulation:
                 # If there's any error drawing, skip this line
                 continue
     
-    def _draw_dashed_line(self, color, start_pos, end_pos, width):
-        """Draw a dashed line between two points."""
+    def _draw_dashed_line(self, color, start_pos, end_pos, width, alt_color=None):
+        """Draw a dashed line between two points. If alt_color is provided,
+        alternate dash segments between color and alt_color."""
         x1, y1 = start_pos
         x2, y2 = end_pos
         
@@ -974,6 +985,7 @@ class CircleSimulation:
         segment_length = dash_length + gap_length
         
         current_pos = 0
+        seg_index = 0
         while current_pos < length:
             # Start of dash
             start_x = x1 + current_pos * dx
@@ -984,16 +996,22 @@ class CircleSimulation:
             end_x = x1 + end_pos_current * dx
             end_y = y1 + end_pos_current * dy
             
+            # Choose color for this dash
+            dash_color = color
+            if alt_color is not None:
+                dash_color = color if (seg_index % 2 == 0) else alt_color
+
             # Draw dash segment
             pygame.draw.line(
-                self.screen, 
-                color, 
-                (int(start_x), int(start_y)), 
-                (int(end_x), int(end_y)), 
-                width
+                self.screen,
+                dash_color,
+                (int(start_x), int(start_y)),
+                (int(end_x), int(end_y)),
+                width,
             )
             
             current_pos += segment_length
+            seg_index += 1
     
     def render_ui(self):
         """Render the user interface overlay."""
